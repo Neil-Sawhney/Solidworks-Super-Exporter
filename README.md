@@ -1,8 +1,6 @@
 # Solidworks Super Exporter
 
-SolidWorks macro for batch exporting parts, assembly bodies and configurations to STL, STEP, PDF and more, from one dialog.
-
-The macro is called **SWExporter**. It works in SolidWorks 2022 and newer.
+SolidWorks macro for batch exporting parts, assembly bodies and configurations to STL, STEP, PDF and more.
 
 ## Supported formats
 
@@ -19,8 +17,6 @@ The macro is called **SWExporter**. It works in SolidWorks 2022 and newer.
 | 3D PDF | |
 | eDrawings | |
 | JPG / PNG | |
-
-The format list lives in `SWExporter.ini`, so you can add a format or change which ones are ticked by default. If the file is missing, the built-in list above is used.
 
 ## What it does
 
