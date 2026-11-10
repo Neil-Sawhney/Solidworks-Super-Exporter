@@ -2,7 +2,7 @@
 ' SWExporter - standard module.  Paste into a new module (Insert > Module).
 ' Successor to Lenny Kikstra's DocExport (v1.30).  Entry point: main
 ' Exports bodies, configurations, configs x bodies, assembly components,
-' drawing sheets, or a batch of files to
+' visible bodies (part or assembly), drawing sheets, or a batch of files to
 ' STL/STEP/IGES/X_T/SAT/3MF/GLB/OBJ/PDF/eDrawings/DWG/DXF/JPG/PNG.
 ' References (Tools > References):
 '   SldWorks <year> Type Library
@@ -48,6 +48,7 @@ Public Const MODE_SHEETS As Long = 3
 Public Const MODE_BATCH As Long = 4
 Public Const MODE_COMPONENTS As Long = 5
 Public Const MODE_COMPBODIES As Long = 6
+Public Const MODE_VISBODIES As Long = 7     ' visible solid bodies, one file each (part or assembly)
 
 ' ---- format table (filled from the ini or the built-in defaults) ----
 Public Type ExportFormat
@@ -94,6 +95,8 @@ Private mAnchorDoc As SldWorks.ModelDoc2   ' assembly whose folder/name is used 
 Private mCompName As String          ' value of {component}
 Private mDone As Object              ' parts already exported in this run (batch)
 Private mFso As Object
+Private mBodyFilter As Collection    ' assembly export: body names shown in the assembly (Nothing = no filter)
+Private mFilterStrict As Boolean     ' True = never fall back to "all bodies" when no name matches
 
 ' ---- mesh buffer for the GLB/OBJ writer (meters, 9 floats per triangle) ----
 Private mPos() As Single
@@ -172,8 +175,9 @@ Private Sub AddFormat(ByVal pLabel As String, ByVal pExt As String, ByVal pKind 
     gFormatCount = gFormatCount + 1
 End Sub
 
+' Built-in defaults when SWExporter.ini is missing or unreadable: only STEP is pre-ticked.
 Private Sub LoadDefaultFormats()
-    AddFormat "STL", ".stl", "MODEL", "MESH", True
+    AddFormat "STL", ".stl", "MODEL", "MESH", False
     AddFormat "STEP AP214", ".step", "MODEL", "ISOLATE", True
     AddFormat "IGES", ".igs", "MODEL", "ISOLATE", False
     AddFormat "Parasolid", ".x_t", "MODEL", "ISOLATE", False
@@ -185,7 +189,7 @@ Private Sub LoadDefaultFormats()
     AddFormat "PNG image", ".png", "MODEL", "MESH", False
     AddFormat "eDrawings", ".e*", "MODEL", "WHOLE", False
     AddFormat "3D PDF", ".pdf", "MODEL", "WHOLE", False
-    AddFormat "PDF", ".pdf", "DRAWING", "SINGLE", True
+    AddFormat "PDF", ".pdf", "DRAWING", "SINGLE", False
     AddFormat "eDrawings", ".edrw", "DRAWING", "SINGLE", False
     AddFormat "DWG", ".dwg", "DRAWING", "MULTI", False
     AddFormat "DXF", ".dxf", "DRAWING", "MULTI", False
@@ -378,6 +382,140 @@ Private Function IsCompShown(ByVal comp As Object) As Boolean
     IsCompShown = True
 End Function
 
+'------------------------- visible bodies in assembly context -------------------
+' Walks the assembly tree from the root component of the active configuration.
+' Skips (with everything below them) components that are suppressed, hidden in the
+' active display state, or envelopes. ExcludeFromBOM is NOT a visibility setting
+' and is ignored. For every remaining part component it reads the bodies of that
+' component instance (Component2.GetBodies3) and keeps the ones whose Body2.Visible
+' is True in the assembly context, so bodies hidden in the assembly, by the active
+' display state, or in the part file itself are all left out.
+' Returns a Dictionary "path|referenced config" -> Collection of body names (union
+' over every shown instance of that part + configuration). comps receives a
+' Dictionary with the same keys -> first Component2 found.
+Public Function VisibleBodyMap(asm As SldWorks.ModelDoc2, ByVal inclSurf As Boolean, comps As Object) As Object
+    Dim map As Object, root As Object, v As Variant, a As SldWorks.AssemblyDoc
+    Set map = CreateObject("Scripting.Dictionary")
+    map.CompareMode = vbTextCompare
+    Set comps = CreateObject("Scripting.Dictionary")
+    comps.CompareMode = vbTextCompare
+    Set VisibleBodyMap = map
+    If asm Is Nothing Then Exit Function
+    If asm.GetType <> swDocumentTypes_e.swDocASSEMBLY Then Exit Function
+    On Error Resume Next
+    Set root = asm.ConfigurationManager.ActiveConfiguration.GetRootComponent3(False)
+    If Not root Is Nothing Then
+        v = Empty
+        v = root.GetChildren
+    Else
+        Set a = asm
+        v = Empty
+        v = a.GetComponents(True)                   ' top level only; children are walked below
+    End If
+    On Error GoTo 0
+    CollectVisibleBodies v, inclSurf, map, comps, 0
+End Function
+
+Private Sub CollectVisibleBodies(ByVal v As Variant, ByVal inclSurf As Boolean, ByVal map As Object, _
+                                 ByVal comps As Object, ByVal depth As Long)
+    Dim i As Long, ch As Object, p As String, kids As Variant
+    If Not IsArray(v) Then Exit Sub
+    If depth > 64 Then Exit Sub
+    For i = LBound(v) To UBound(v)
+        Set ch = Nothing
+        On Error Resume Next
+        Set ch = v(i)
+        On Error GoTo 0
+        If CompIsShownHere(ch) Then
+            p = ""
+            On Error Resume Next
+            p = LCase$(ch.GetPathName)
+            On Error GoTo 0
+            If Right$(p, 7) = ".sldprt" Then
+                AddCompVisibleBodies ch, inclSurf, map, comps
+            ElseIf Right$(p, 7) = ".sldasm" Then
+                kids = Empty
+                On Error Resume Next
+                kids = ch.GetChildren
+                On Error GoTo 0
+                CollectVisibleBodies kids, inclSurf, map, comps, depth + 1
+            End If
+        End If
+    Next i
+End Sub
+
+' This component itself (its parents were already checked by the tree walk).
+Private Function CompIsShownHere(ByVal comp As Object) As Boolean
+    Dim b As Boolean, vis As Long
+    On Error GoTo Nope
+    If comp Is Nothing Then Exit Function
+    If comp.IsSuppressed Then Exit Function
+    vis = 1
+    vis = comp.Visible                  ' swComponentVisibilityState_e: 0 = hidden (active display state)
+    If vis = 0 Then Exit Function
+    If comp.IsHidden(True) Then Exit Function
+    b = False
+    On Error Resume Next
+    b = comp.IsEnvelope
+    On Error GoTo Nope
+    If b Then Exit Function
+    CompIsShownHere = True
+Nope:
+End Function
+
+Private Sub AddCompVisibleBodies(ByVal comp As Object, ByVal inclSurf As Boolean, ByVal map As Object, ByVal comps As Object)
+    Dim key As String, c As Collection, vb As Variant, info As Variant, j As Long
+    Dim t As Long, nT As Long, st As Long, vis As Boolean, b As Object, nm As String
+    On Error Resume Next
+    key = comp.GetPathName & "|" & comp.ReferencedConfiguration
+    If map.Exists(key) Then
+        Set c = map(key)
+    Else
+        Set c = New Collection
+        map.Add key, c
+        comps.Add key, comp
+    End If
+    If inclSurf Then nT = 1 Else nT = 0
+    For t = 0 To nT                     ' 0 = swSolidBody, 1 = swSheetBody
+        vb = Empty
+        vb = comp.GetBodies3(t, info)
+        If (Not IsArray(vb)) And t = 0 Then
+            st = -1
+            st = comp.GetSuppression2
+            If st = 1 Or st = 4 Then    ' lightweight: resolve it so its bodies can be read
+                comp.SetSuppression2 2  ' swComponentFullyResolved
+                vb = Empty
+                vb = comp.GetBodies3(t, info)
+            End If
+        End If
+        If IsArray(vb) Then
+            For j = LBound(vb) To UBound(vb)
+                Set b = Nothing
+                Set b = vb(j)
+                If Not b Is Nothing Then
+                    vis = False
+                    vis = b.Visible     ' Body2.Visible of the component instance = what the assembly shows
+                    If vis Then
+                        nm = BodyKeyName(CStr(b.Name))
+                        If nm <> "" Then AddUnique c, nm
+                    End If
+                End If
+            Next j
+        End If
+    Next t
+End Sub
+
+' Body name as the part document knows it (drops any "comp/" prefix or "@..." suffix).
+Public Function BodyKeyName(ByVal n As String) As String
+    If InStrRev(n, "/") > 0 Then n = Mid$(n, InStrRev(n, "/") + 1)
+    If InStr(n, "@") > 0 Then n = Left$(n, InStr(n, "@") - 1)
+    BodyKeyName = n
+End Function
+
+Public Sub AddUnique(ByVal c As Collection, ByVal s As String)
+    If Not InCollection(c, s) Then c.Add s
+End Sub
+
 Private Function CompShortName(ByVal comp As Object) As String
     Dim n As String
     On Error Resume Next
@@ -429,6 +567,8 @@ Public Sub RunExport(m As SldWorks.ModelDoc2)
     mDone.CompareMode = vbTextCompare
     Set mAnchorDoc = Nothing
     mCompName = ""
+    Set mBodyFilter = Nothing
+    mFilterStrict = False
     mLog = "time,source,config,body,sheet,format,output,status,errors,warnings" & vbCrLf
     mOk = 0: mFail = 0: mSkip = 0: mStep = 0
     gCancel = False
@@ -459,6 +599,12 @@ Public Sub RunExport(m As SldWorks.ModelDoc2)
         ExportDrawing m, gSelItems
     ElseIf gMode = MODE_COMPONENTS Or gMode = MODE_COMPBODIES Then
         ExportComponents m, gMode, gSelItems
+    ElseIf gMode = MODE_VISBODIES Then
+        If m.GetType = swDocumentTypes_e.swDocASSEMBLY Then
+            ExportVisibleBodies m, gSelItems
+        Else
+            ExportModel m, MODE_BODIES, gSelItems       ' part: the ticked visible bodies, like Bodies mode
+        End If
     Else
         ExportModel m, gMode, gSelItems
     End If
@@ -471,6 +617,8 @@ Done:
     On Error Resume Next
     Set mAnchorDoc = Nothing
     mCompName = ""
+    Set mBodyFilter = Nothing
+    mFilterStrict = False
     swApp.SetUserPreferenceToggle swUserPreferenceToggle_e.swSTLBinaryFormat, oldBin
     swApp.SetUserPreferenceToggle swUserPreferenceToggle_e.swSTLComponentsIntoOneFile, oldOneFile
     swApp.SetUserPreferenceIntegerValue swUserPreferenceIntegerValue_e.swExportStlUnits, oldUnits
@@ -636,16 +784,25 @@ Private Sub ExportAssemblyParts(asm As SldWorks.ModelDoc2)
 End Sub
 
 ' Components / Components x bodies with an assembly open.
+' Bodies hidden in the assembly (or its display state) are left out of each part.
 Private Sub ExportComponents(asm As SldWorks.ModelDoc2, ByVal mode As Long, ByVal sel As Collection)
     Dim d As Object, k As Variant, n As Long, md As Long
+    Dim vmap As Object, vcomps As Object, filt As Collection
     If mode = MODE_COMPONENTS Then md = MODE_CONFIGS Else md = MODE_CFGBODIES
     Set d = AssemblyParts(asm, True)
+    Set vmap = VisibleBodyMap(asm, True, vcomps)        ' solids + surfaces shown in the assembly
     For Each k In d.Keys
         If gCancel Then Exit For
         If InCollection(sel, CStr(k)) Then
             n = n + 1
             SetStatus "Component " & n & ": " & PartKeyDisplay(CStr(k))
-            ExportAsmPart asm, d(k), CfgOfKey(CStr(k)), md
+            Set filt = Nothing
+            If vmap.Exists(CStr(k)) Then
+                Set filt = vmap(CStr(k))
+                If filt.Count = 0 Then Set filt = Nothing   ' bodies could not be read: old behaviour
+            End If
+            mFilterStrict = False
+            ExportAsmPart asm, d(k), CfgOfKey(CStr(k)), md, filt
         End If
         DoEvents
     Next k
@@ -655,10 +812,42 @@ Private Sub ExportComponents(asm As SldWorks.ModelDoc2, ByVal mode As Long, ByVa
     End If
 End Sub
 
+' Visible bodies with an assembly open. sel holds "path|config" & vbTab & body name.
+Private Sub ExportVisibleBodies(asm As SldWorks.ModelDoc2, ByVal sel As Collection)
+    Dim map As Object, comps As Object, k As Variant, filt As Collection
+    Dim i As Long, n As Long, s As String, pfx As String
+    Set map = VisibleBodyMap(asm, gIncludeSurfaces, comps)
+    For Each k In map.Keys
+        If gCancel Then Exit For
+        pfx = CStr(k) & vbTab
+        Set filt = New Collection
+        For i = 1 To sel.Count
+            s = CStr(sel(i))
+            If Len(s) > Len(pfx) Then
+                If StrComp(Left$(s, Len(pfx)), pfx, vbTextCompare) = 0 Then AddUnique filt, Mid$(s, Len(pfx) + 1)
+            End If
+        Next i
+        If filt.Count > 0 Then
+            n = n + 1
+            SetStatus "Visible bodies " & n & ": " & PartKeyDisplay(CStr(k))
+            mFilterStrict = True
+            ExportAsmPart asm, comps(k), CfgOfKey(CStr(k)), MODE_CFGBODIES, filt
+        End If
+        DoEvents
+    Next k
+    mFilterStrict = False
+    If n = 0 Then
+        AddLog DocKey(asm), "", "", "", "", "", "SKIPPED: none of the ticked bodies were found", 0, 0
+        mSkip = mSkip + 1
+    End If
+End Sub
+
 ' Exports one part of an assembly from its own part document.
+' bodyFilter = names of the bodies shown in the assembly (Nothing = every visible body of the part).
 ' cfgSpec = a configuration name, or "*" for all configurations matching the config filter.
 ' Output folder and {file} in the subfolder name follow the assembly.
-Private Sub ExportAsmPart(asm As SldWorks.ModelDoc2, ByVal comp As Object, ByVal cfgSpec As String, ByVal mode As Long)
+Private Sub ExportAsmPart(asm As SldWorks.ModelDoc2, ByVal comp As Object, ByVal cfgSpec As String, ByVal mode As Long, _
+                          Optional ByVal bodyFilter As Collection = Nothing)
     Dim pm As SldWorks.ModelDoc2, closeAfter As Long, cfgs As Collection, v As Variant
     Dim k As Long, e As Long, p As String
     On Error GoTo EH
@@ -688,12 +877,14 @@ Private Sub ExportAsmPart(asm As SldWorks.ModelDoc2, ByVal comp As Object, ByVal
     Else
         Set mAnchorDoc = asm
         mCompName = CompShortName(comp)
+        Set mBodyFilter = bodyFilter
         ExportModel pm, mode, cfgs
     End If
 Cleanup:
     On Error Resume Next
     Set mAnchorDoc = Nothing
     mCompName = ""
+    Set mBodyFilter = Nothing
     If Not pm Is Nothing Then
         If closeAfter = 1 Then swApp.CloseDoc DocKey(pm)
         If closeAfter = 2 Then pm.Visible = False
@@ -739,11 +930,15 @@ Private Sub ExportModel(m As SldWorks.ModelDoc2, ByVal mode As Long, ByVal sel A
         End If
         If mode = MODE_CONFIGS Or m.GetType <> swDocumentTypes_e.swDocPART Then
             ' whole model per configuration
-            For f = 0 To gFormatCount - 1
-                If gFormats(f).Selected And gFormats(f).Kind = "MODEL" Then
-                    SaveOne m, gFormats(f), cfgName, "", ""
-                End If
-            Next f
+            If mode = MODE_CONFIGS And (Not mBodyFilter Is Nothing) And m.GetType = swDocumentTypes_e.swDocPART Then
+                ExportWholeFiltered m, cfgName              ' assembly component: leave out bodies hidden in the assembly
+            Else
+                For f = 0 To gFormatCount - 1
+                    If gFormats(f).Selected And gFormats(f).Kind = "MODEL" Then
+                        SaveOne m, gFormats(f), cfgName, "", ""
+                    End If
+                Next f
+            End If
         Else
             ExportBodies m, cfgName, bodySel
         End If
@@ -764,16 +959,28 @@ End Sub
 
 Private Sub ExportBodies(m As SldWorks.ModelDoc2, ByVal cfgName As String, ByVal bodySel As Collection)
     Dim vAll As Variant, b As SldWorks.Body2, i As Long, j As Long, f As Long
-    Dim bName As String, needMesh As Boolean, nFound As Long
+    Dim bName As String, needMesh As Boolean, nFound As Long, filt As Collection
 
     ' vAll = every visible body (solids + surfaces). All of them are hidden while one
     ' body is exported to a mesh format, so nothing else can leak into the file.
+    ' filt (assembly export) = bodies shown in the assembly; the others are skipped.
     vAll = VisibleBodies(m, True)
+    Set filt = mBodyFilter
     If IsArray(vAll) Then
         For i = LBound(vAll) To UBound(vAll)
             Set b = vAll(i)
-            If gIncludeSurfaces Or b.GetType = swBodyType_e.swSolidBody Then nFound = nFound + 1
+            If gIncludeSurfaces Or b.GetType = swBodyType_e.swSolidBody Then
+                If InCollection(filt, CStr(b.Name)) Then nFound = nFound + 1
+            End If
         Next i
+        If nFound = 0 And (Not filt Is Nothing) And (Not mFilterStrict) Then
+            ' no body name matched the assembly's list: fall back to every visible body
+            Set filt = Nothing
+            For i = LBound(vAll) To UBound(vAll)
+                Set b = vAll(i)
+                If gIncludeSurfaces Or b.GetType = swBodyType_e.swSolidBody Then nFound = nFound + 1
+            Next i
+        End If
     End If
     If nFound = 0 Then
         AddLog DocKey(m), cfgName, "", "", "", "", "SKIPPED: no visible bodies", 0, 0
@@ -789,7 +996,8 @@ Private Sub ExportBodies(m As SldWorks.ModelDoc2, ByVal cfgName As String, ByVal
         If gCancel Then Exit For
         Set b = vAll(i)
         bName = b.Name
-        If (gIncludeSurfaces Or b.GetType = swBodyType_e.swSolidBody) And InCollection(bodySel, bName) Then
+        If (gIncludeSurfaces Or b.GetType = swBodyType_e.swSolidBody) And InCollection(bodySel, bName) _
+           And InCollection(filt, bName) Then
             ' 1) mesh / image formats: hide every other body, save, show again
             If needMesh Then
                 For j = LBound(vAll) To UBound(vAll)
@@ -836,14 +1044,82 @@ Private Sub ShowAll(ByVal v As Variant)
     Next j
 End Sub
 
+' Whole part, minus the bodies hidden in the assembly (mBodyFilter = bodies shown there).
+' Mesh / image / eDrawings / 3D PDF: the hidden bodies are hidden in the part while it saves.
+' STEP / IGES / Parasolid / SAT: the shown bodies are copied into one temporary part.
+' When nothing is hidden in the assembly, this is the normal whole-model export.
+Private Sub ExportWholeFiltered(m As SldWorks.ModelDoc2, ByVal cfgName As String)
+    Dim vAll As Variant, b As SldWorks.Body2, i As Long, f As Long
+    Dim keep() As Object, hid() As Object, nKeep As Long, nHide As Long, vKeep As Variant
+    vAll = VisibleBodies(m, True)
+    If IsArray(vAll) Then
+        For i = LBound(vAll) To UBound(vAll)
+            Set b = vAll(i)
+            If InCollection(mBodyFilter, CStr(b.Name)) Then
+                ReDim Preserve keep(0 To nKeep)
+                Set keep(nKeep) = b
+                nKeep = nKeep + 1
+            Else
+                ReDim Preserve hid(0 To nHide)
+                Set hid(nHide) = b
+                nHide = nHide + 1
+            End If
+        Next i
+    End If
+    If nHide = 0 Or nKeep = 0 Then
+        ' nothing hidden in the assembly (or no name matched): whole model as before
+        For f = 0 To gFormatCount - 1
+            If gFormats(f).Selected And gFormats(f).Kind = "MODEL" Then
+                SaveOne m, gFormats(f), cfgName, "", ""
+            End If
+        Next f
+        Exit Sub
+    End If
+
+    On Error GoTo EH
+    For i = 0 To nHide - 1
+        hid(i).HideBody True
+    Next i
+    m.GraphicsRedraw2
+    For f = 0 To gFormatCount - 1
+        If gFormats(f).Selected And gFormats(f).Kind = "MODEL" And gFormats(f).Flag <> "ISOLATE" Then
+            SaveOne m, gFormats(f), cfgName, "", ""
+        End If
+    Next f
+    vKeep = keep
+    SaveIsolatedBodies m, vKeep, cfgName, ""
+Cleanup:
+    On Error Resume Next
+    For i = 0 To nHide - 1
+        hid(i).HideBody False
+    Next i
+    m.GraphicsRedraw2
+    Exit Sub
+EH:
+    AddLog DocKey(m), cfgName, "", "", "", "", "ERROR: " & Err.Description, 0, 0
+    mFail = mFail + 1
+    Resume Cleanup
+End Sub
+
 ' Copies one body into a temporary (hidden) part, saves it in every ticked ISOLATE
 ' format, then closes the temporary part without saving.
 Private Sub SaveIsolated(src As SldWorks.ModelDoc2, ByVal body As SldWorks.Body2, _
                          ByVal cfgName As String, ByVal bName As String)
-    Dim f As Long, nTodo As Long, outPath As String, paths() As String
-    Dim tmpl As String, tmp As SldWorks.ModelDoc2, tmpPart As SldWorks.PartDoc
+    Dim one() As Object, v As Variant
+    ReDim one(0 To 0)
+    Set one(0) = body
+    v = one
+    SaveIsolatedBodies src, v, cfgName, bName
+End Sub
+
+' Same, for one or more bodies (Variant array of Body2): all go into one temporary part.
+Private Sub SaveIsolatedBodies(src As SldWorks.ModelDoc2, ByVal bodies As Variant, _
+                               ByVal cfgName As String, ByVal bName As String)
+    Dim f As Long, nTodo As Long, outPath As String, paths() As String, i As Long
+    Dim tmpl As String, tmp As SldWorks.ModelDoc2, tmpPart As SldWorks.PartDoc, body As SldWorks.Body2
     Dim feat As SldWorks.Feature, e As Long, w As Long, ok As Boolean, visOff As Boolean
 
+    If Not IsArray(bodies) Then Exit Sub
     ReDim paths(0 To gFormatCount)
     For f = 0 To gFormatCount - 1
         If gFormats(f).Selected And gFormats(f).Kind = "MODEL" And gFormats(f).Flag = "ISOLATE" Then
@@ -874,13 +1150,17 @@ Private Sub SaveIsolated(src As SldWorks.ModelDoc2, ByVal body As SldWorks.Body2
         GoTo Cleanup
     End If
     Set tmpPart = tmp
-    Set feat = tmpPart.CreateFeatureFromBody3(body.Copy, False, swCreateFeatureBodyOpts_e.swCreateFeatureBodySimplify)
-    If feat Is Nothing Then Set feat = tmpPart.CreateFeatureFromBody3(body.Copy, False, swCreateFeatureBodyOpts_e.swCreateFeatureBodyCheck)
-    If feat Is Nothing Then Set feat = tmpPart.CreateFeatureFromBody3(body.Copy, False, 0)
-    If feat Is Nothing Then
-        FailPaths src, cfgName, bName, paths, "FAILED: CreateFeatureFromBody3 could not copy the body"
-        GoTo Cleanup
-    End If
+    For i = LBound(bodies) To UBound(bodies)
+        Set body = bodies(i)
+        Set feat = Nothing
+        Set feat = tmpPart.CreateFeatureFromBody3(body.Copy, False, swCreateFeatureBodyOpts_e.swCreateFeatureBodySimplify)
+        If feat Is Nothing Then Set feat = tmpPart.CreateFeatureFromBody3(body.Copy, False, swCreateFeatureBodyOpts_e.swCreateFeatureBodyCheck)
+        If feat Is Nothing Then Set feat = tmpPart.CreateFeatureFromBody3(body.Copy, False, 0)
+        If feat Is Nothing Then
+            FailPaths src, cfgName, bName, paths, "FAILED: CreateFeatureFromBody3 could not copy the body"
+            GoTo Cleanup
+        End If
+    Next i
     For f = 0 To gFormatCount - 1
         If paths(f) <> "" Then
             e = 0: w = 0

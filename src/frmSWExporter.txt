@@ -49,6 +49,9 @@ Private mCtlCount As Long
 
 ' ---- hover tips ----
 Private Const TIP_MODE As String = "What to export. The choices depend on the open document."
+Private Const TIP_VISBODIES As String = "Visible bodies: each solid body you can see, as its own file. In an assembly, hidden, " & _
+    "suppressed and envelope parts are skipped, and so are bodies hidden in the assembly or its display state. " & _
+    "Tick Surface bodies to add visible surfaces."
 Private Const TIP_ITEMS As String = "Tick what to export. In Batch: the files to process."
 Private Const TIP_SURF As String = "Also list and export visible surface bodies."
 Private Const TIP_FILTER As String = "Text to look for in the item list (used by Select/Clear matches)."
@@ -163,7 +166,7 @@ Private Sub UserForm_Initialize()
     cboCollision.ListIndex = 0
     Set chkDry = AddCtl("Forms.CheckBox.1", 170, y, 70, 16, "Dry run", "Write nothing; log the paths that would be written.")
     Set chkLog = AddCtl("Forms.CheckBox.1", 246, y, 110, 16, "Write log CSV", "Save a CSV log of every file written, skipped or failed.")
-    chkLog.Value = True
+    chkLog.Value = False          ' default: no log
 
     ' batch
     y = y + 24
@@ -215,6 +218,7 @@ Private Sub btnHelp_Click()
         "Configs x bodies: every body of every ticked configuration." & vbLf & _
         "Components: each visible part of the assembly, once per part and configuration." & vbLf & _
         "Components x bodies: every body of each of those parts." & vbLf & _
+        "Visible bodies: each visible solid body as its own file." & vbLf & _
         "Drawing sheets: one file per sheet; PDF as one file or per sheet." & vbLf & _
         "Batch: files in a folder (+ Subfolders) or picked with Add files." & vbLf & vbLf & _
         "PARTS IN BATCH: how each part is split - all configurations, bodies of the active configuration, " & _
@@ -238,10 +242,12 @@ Private Sub FillModes()
             names.Add "Bodies (each visible body)": ids.Add MODE_BODIES
             names.Add "Configurations": ids.Add MODE_CONFIGS
             names.Add "Configurations x bodies": ids.Add MODE_CFGBODIES
+            names.Add "Visible bodies (solid, one file each)": ids.Add MODE_VISBODIES
         Case swDocumentTypes_e.swDocASSEMBLY
             names.Add "Configurations": ids.Add MODE_CONFIGS
             names.Add "Components (each visible part)": ids.Add MODE_COMPONENTS
             names.Add "Components x bodies": ids.Add MODE_COMPBODIES
+            names.Add "Visible bodies (each visible body)": ids.Add MODE_VISBODIES
         Case swDocumentTypes_e.swDocDRAWING
             names.Add "Drawing sheets": ids.Add MODE_SHEETS
     End Select
@@ -265,12 +271,19 @@ End Function
 
 Private Sub cboMode_Change()
     If cboMode.ListIndex < 0 Then Exit Sub
+    If CurMode() = MODE_VISBODIES Then
+        cboMode.ControlTipText = TIP_VISBODIES
+        lstItems.ControlTipText = TIP_VISBODIES
+    Else
+        cboMode.ControlTipText = TIP_MODE
+        lstItems.ControlTipText = TIP_ITEMS
+    End If
     FillItems
     FillFormats
 End Sub
 
 Private Sub chkSurf_Click()
-    If CurMode() = MODE_BODIES Then FillItems
+    If CurMode() = MODE_BODIES Or CurMode() = MODE_VISBODIES Then FillItems
 End Sub
 
 '------------------------------ item list --------------------------------------
@@ -297,10 +310,11 @@ End Sub
 
 Private Sub FillItems()
     Dim v As Variant, i As Long, c As Collection, activeName As String
-    Dim drw As SldWorks.DrawingDoc, md As Long, d As Object, k As Variant
+    Dim drw As SldWorks.DrawingDoc, md As Long, d As Object, k As Variant, dc As Object
     md = CurMode()
     ClearItems
-    chkSurf.Enabled = (md = MODE_BODIES Or md = MODE_CFGBODIES Or md = MODE_COMPBODIES Or md = MODE_BATCH)
+    chkSurf.Enabled = (md = MODE_BODIES Or md = MODE_CFGBODIES Or md = MODE_COMPBODIES Or md = MODE_BATCH _
+                       Or md = MODE_VISBODIES)
     SetBatchEnabled (md = MODE_BATCH)
     Select Case md
         Case MODE_BODIES
@@ -309,6 +323,24 @@ Private Sub FillItems()
             For i = 1 To c.Count
                 AddListItem c(i), c(i), True
             Next i
+        Case MODE_VISBODIES
+            If mDoc.GetType = swDocumentTypes_e.swDocASSEMBLY Then
+                ' one row per body shown in the assembly; key = "path|config" & Tab & body name
+                lblItems.Caption = "Visible bodies (part [configuration] : body):"
+                Set d = VisibleBodyMap(mDoc, CBool(chkSurf.Value), dc)
+                For Each k In d.Keys
+                    Set c = d(k)
+                    For i = 1 To c.Count
+                        AddListItem PartKeyDisplay(CStr(k)) & " : " & CStr(c(i)), CStr(k) & vbTab & CStr(c(i)), True
+                    Next i
+                Next k
+            Else
+                lblItems.Caption = "Visible bodies:"
+                Set c = GetBodyNames(mDoc, CBool(chkSurf.Value))
+                For i = 1 To c.Count
+                    AddListItem c(i), c(i), True
+                Next i
+            End If
         Case MODE_CONFIGS, MODE_CFGBODIES
             If md = MODE_CONFIGS Then
                 lblItems.Caption = "Configurations:"
