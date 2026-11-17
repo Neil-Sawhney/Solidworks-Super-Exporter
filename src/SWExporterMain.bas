@@ -104,12 +104,6 @@ Private mNrm() As Single
 Private mCnt As Long
 
 '===============================================================================
-Sub main()
-    Set swApp = Application.SldWorks
-    LoadFormats
-    frmSWExporter.Show
-End Sub
-
 Private Function FS() As Object
     If mFso Is Nothing Then Set mFso = CreateObject("Scripting.FileSystemObject")
     Set FS = mFso
@@ -122,7 +116,7 @@ Public Function MacroFolder() As String
     If InStrRev(p, "\") > 0 Then MacroFolder = Left$(p, InStrRev(p, "\") - 1)
 End Function
 
-Public Sub LoadFormats()
+Public Sub LoadFormats(Optional ByVal notAMacro As Boolean)
     Dim iniPath As String, ts As Object, ln As String, section As String
     gFormatCount = 0
     ReDim gFormats(0 To 31)
@@ -2003,3 +1997,13 @@ Public Function BrowseForFolder(ByVal prompt As String) As String
     If fld Is Nothing Then Exit Function
     BrowseForFolder = fld.Self.Path
 End Function
+
+'================================ ENTRY POINT ==================================
+' Keep main as the LAST procedure in the module and the only public Sub without
+' arguments: Tools > Macro > Run starts the last such procedure, so anything
+' after it (or another no-argument Public Sub, e.g. LoadFormats) would run instead.
+Sub main()
+    Set swApp = Application.SldWorks
+    LoadFormats
+    frmSWExporter.Show
+End Sub
