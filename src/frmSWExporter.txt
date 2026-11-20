@@ -3,195 +3,327 @@
 ' Insert > UserForm, set its (Name) to frmSWExporter, open its code window,
 ' delete anything there and paste this. Leave the form empty in the designer:
 ' every control is created in code.
+' Layout: 1 What to export | 2 Scope / filters (left column)
+'         3 Formats | 4 Output & naming | 5 Options (right column), buttons bottom-right.
 '===============================================================================
 Option Explicit
 
+' ---- 1 What to export ----
 Private WithEvents cboMode As MSForms.ComboBox
 Private WithEvents btnHelp As MSForms.CommandButton
+Private lblModeHelp As MSForms.Label
 Private lblItems As MSForms.Label
-Private lstItems As MSForms.ListBox
+Private WithEvents lstItems As MSForms.ListBox
 Private WithEvents btnAll As MSForms.CommandButton
 Private WithEvents btnNone As MSForms.CommandButton
-Private WithEvents chkSurf As MSForms.CheckBox
+Private lblCount As MSForms.Label
+' ---- 2 Scope / filters ----
 Private txtFilter As MSForms.TextBox
-Private chkCase As MSForms.CheckBox
+Private WithEvents chkCase As MSForms.CheckBox
 Private WithEvents btnSelMatch As MSForms.CommandButton
 Private WithEvents btnClrMatch As MSForms.CommandButton
+Private WithEvents chkSurf As MSForms.CheckBox
+Private lblCfgFilter As MSForms.Label
+Private WithEvents txtCfgFilter As MSForms.TextBox
+Private lblBatch As MSForms.Label
+Private txtBatch As MSForms.TextBox
+Private WithEvents btnBrowseBatch As MSForms.CommandButton
+Private WithEvents chkRecurse As MSForms.CheckBox
+Private WithEvents btnRefresh As MSForms.CommandButton
+Private WithEvents btnAddFiles As MSForms.CommandButton
+Private lblBatchModel As MSForms.Label
+Private cboBatchModel As MSForms.ComboBox
+' ---- 3 Formats ----
 Private lstFormats As MSForms.ListBox
 Private chkPdfOne As MSForms.CheckBox
+Private lblUnits As MSForms.Label
 Private cboUnits As MSForms.ComboBox
+Private lblQuality As MSForms.Label
 Private cboQuality As MSForms.ComboBox
 Private chkBinary As MSForms.CheckBox
+' ---- 4 Output & naming ----
 Private WithEvents cboOut As MSForms.ComboBox
 Private txtOut As MSForms.TextBox
 Private WithEvents btnBrowseOut As MSForms.CommandButton
 Private txtTemplate As MSForms.TextBox
 Private cboCollision As MSForms.ComboBox
+' ---- 5 Options + buttons ----
 Private chkDry As MSForms.CheckBox
 Private chkLog As MSForms.CheckBox
-Private txtBatch As MSForms.TextBox
-Private WithEvents btnBrowseBatch As MSForms.CommandButton
-Private WithEvents btnRefresh As MSForms.CommandButton
-Private WithEvents btnAddFiles As MSForms.CommandButton
-Private WithEvents chkRecurse As MSForms.CheckBox
-Private cboBatchModel As MSForms.ComboBox
-Private txtCfgFilter As MSForms.TextBox
+Private lblStatus As MSForms.Label
 Private WithEvents btnExport As MSForms.CommandButton
 Private WithEvents btnClose As MSForms.CommandButton
-Private lblStatus As MSForms.Label
 
+' ---- form state ----
 Private mDoc As SldWorks.ModelDoc2
 Private mModeIds() As Long
 Private mFmtIdx() As Long          ' format list row -> gFormats index
 Private mKeys As Collection        ' item list row (1-based) -> key passed to the export
 Private mBusy As Boolean
+Private mFilling As Boolean        ' True while the item list is being refilled
 Private mCtlCount As Long
+
+' ---- layout (points) ----
+Private Const COL1_X As Single = 8       ' left column: sections 1 and 2
+Private Const COL1_W As Single = 240
+Private Const COL2_X As Single = 258     ' right column: sections 3, 4 and 5
+Private Const COL2_W As Single = 240
+Private Const LBL_W As Single = 64       ' caption width in front of a field
+Private Const ROW_H As Single = 16
+Private Const ROW_GAP As Single = 20     ' one field row
+Private Const SECTION_GAP As Single = 8  ' extra space before a section header
 
 ' ---- hover tips ----
 Private Const TIP_MODE As String = "What to export. The choices depend on the open document."
-Private Const TIP_VISBODIES As String = "Visible bodies: each solid body you can see, as its own file. In an assembly, hidden, " & _
-    "suppressed and envelope parts are skipped, and so are bodies hidden in the assembly or its display state. " & _
-    "Tick Surface bodies to add visible surfaces."
-Private Const TIP_ITEMS As String = "Tick what to export. In Batch: the files to process."
-Private Const TIP_SURF As String = "Also list and export visible surface bodies."
-Private Const TIP_FILTER As String = "Text to look for in the item list (used by Select/Clear matches)."
+Private Const TIP_ITEMS As String = "Tick what to export."
+Private Const TIP_COUNT As String = "How many rows are ticked. Display states: how many configuration x state visits " & _
+    "that makes, and how many configurations are skipped because they have no state of that name. Dry run lists every file."
+Private Const TIP_FILTER As String = "Text to look for in the item list (used by Tick / Untick matches)."
 Private Const TIP_CASE As String = "Make Filter and Config filter case-sensitive."
+Private Const TIP_SURF As String = "Also list and export visible surface bodies."
+Private Const TIP_CFGFILTER As String = "Batch and Display states: only configurations whose name contains this text. Blank = all."
+Private Const TIP_BATCH As String = "Folder for batch export. Its files are listed when you pick it or click Refresh."
+Private Const TIP_PARTS As String = "How each part is split in a batch. Also used for the parts inside batch assemblies."
 Private Const TIP_FORMATS As String = "Tick the formats to write."
 Private Const TIP_PDFONE As String = "Ticked: one PDF with all ticked sheets. Unticked: one PDF per sheet."
 Private Const TIP_UNITS As String = "Units for STL and OBJ files."
 Private Const TIP_QUALITY As String = "STL quality. Custom uses the custom tolerance set in SOLIDWORKS."
 Private Const TIP_OUT As String = "Where files go: next to the source file, in a subfolder, or in a custom folder."
 Private Const TIP_OUTTEXT As String = "Subfolder name ({file} and {date} allowed) or custom folder path."
-Private Const TIP_NAME As String = "File name template. Blank = automatic. Tokens: {file} {config} {body} {sheet} {component} {date} {rev}"
+Private Const TIP_NAME As String = "File name template. Blank = automatic. " & _
+    "Tokens: {file} {config} {body} {ds} {sheet} {component} {date} {rev}"
 Private Const TIP_EXISTS As String = "What to do when the output file already exists."
-Private Const TIP_BATCH As String = "Folder for batch export. Its files are listed when you pick it or click Refresh."
-Private Const TIP_PARTS As String = "How each part is split in a batch. Also used for the parts inside batch assemblies."
-Private Const TIP_CFGFILTER As String = "Batch: only export configurations whose name contains this text. Blank = all."
+Private Const TIP_DRY As String = "Write nothing; count and log the paths that would be written."
+Private Const TIP_LOG As String = "Save a CSV log of every file written, skipped or failed."
 
-'------------------------------ layout helpers ---------------------------------
+'=============================== LAYOUT HELPERS ================================
+' Every control gets a unique name; creation order = tab order.
 Private Function AddCtl(ByVal progId As String, ByVal l As Single, ByVal t As Single, _
                         ByVal w As Single, ByVal h As Single, Optional ByVal cap As String = "", _
                         Optional ByVal tip As String = "") As Object
     Dim c As Object
     mCtlCount = mCtlCount + 1
-    Set c = Me.Controls.Add(progId, "rt" & mCtlCount, True)   ' unique name for every control
+    Set c = Me.Controls.Add(progId, "rt" & mCtlCount, True)
     c.Left = l
     c.Top = t
     c.Width = w
     c.Height = h
-    If cap <> "" Then c.Caption = cap
+    If cap <> "" Or progId = "Forms.Label.1" Then c.Caption = cap   ' labels: never a default caption
     If tip <> "" Then c.ControlTipText = tip
     Set AddCtl = c
 End Function
 
-Private Sub Lbl(ByVal cap As String, ByVal l As Single, ByVal t As Single, Optional ByVal w As Single = 80, _
-                Optional ByVal tip As String = "")
-    AddCtl "Forms.Label.1", l, t + 2, w, 12, cap, tip
-End Sub
+' Caption in front of a field (2 pt lower so the text lines up with the field).
+Private Function Lbl(ByVal cap As String, ByVal l As Single, ByVal t As Single, _
+                     Optional ByVal w As Single = LBL_W, Optional ByVal tip As String = "") As MSForms.Label
+    Set Lbl = AddCtl("Forms.Label.1", l, t + 2, w, 12, cap, tip)
+End Function
 
+Private Function Btn(ByVal cap As String, ByVal l As Single, ByVal t As Single, ByVal w As Single, _
+                     ByVal tip As String) As MSForms.CommandButton
+    Set Btn = AddCtl("Forms.CommandButton.1", l, t, w, 18, cap, tip)
+End Function
+
+Private Function Chk(ByVal cap As String, ByVal l As Single, ByVal t As Single, ByVal w As Single, _
+                     ByVal tip As String) As MSForms.CheckBox
+    Set Chk = AddCtl("Forms.CheckBox.1", l, t, w, ROW_H, cap, tip)
+End Function
+
+Private Function Txt(ByVal l As Single, ByVal t As Single, ByVal w As Single, ByVal tip As String) As MSForms.TextBox
+    Set Txt = AddCtl("Forms.TextBox.1", l, t, w, ROW_H, , tip)
+End Function
+
+' Drop-down list (no typing) filled with items.
+Private Function Combo(ByVal l As Single, ByVal t As Single, ByVal w As Single, ByVal tip As String, _
+                       ByVal items As Variant) As MSForms.ComboBox
+    Dim c As MSForms.ComboBox
+    Set c = AddCtl("Forms.ComboBox.1", l, t, w, ROW_H, , tip)
+    c.Style = fmStyleDropDownList
+    If IsArray(items) Then c.List = items
+    Set Combo = c
+End Function
+
+' Multi-select list with a checkbox per row.
+Private Function CheckList(ByVal l As Single, ByVal t As Single, ByVal w As Single, ByVal h As Single, _
+                           ByVal tip As String) As MSForms.ListBox
+    Dim c As MSForms.ListBox
+    Set c = AddCtl("Forms.ListBox.1", l, t, w, h, , tip)
+    c.ListStyle = fmListStyleOption
+    c.MultiSelect = fmMultiSelectMulti
+    Set CheckList = c
+End Function
+
+' Section header: bold caption with a thin line under it. Returns the top of the first row.
+Private Function SectionHeader(ByVal cap As String, ByVal l As Single, ByVal t As Single, ByVal w As Single) As Single
+    Dim hdr As MSForms.Label, ln As MSForms.Label
+    Set hdr = AddCtl("Forms.Label.1", l, t, w, 12, cap)
+    hdr.Font.Bold = True
+    Set ln = AddCtl("Forms.Label.1", l, t + 13, w, 1)
+    ln.BackStyle = fmBackStyleOpaque
+    ln.BackColor = &H808080
+    SectionHeader = t + 18
+End Function
+
+'=============================== BUILD THE FORM ================================
 Private Sub UserForm_Initialize()
-    Dim y As Single
+    Dim yLeft As Single, yRight As Single
     If swApp Is Nothing Then Set swApp = Application.SldWorks
     If gFormatCount = 0 Then LoadFormats
     gFormLoaded = True
     Set mDoc = swApp.ActiveDoc
     Set mKeys = New Collection
-
-    Me.Width = 472
-    Me.Height = 470
     If mDoc Is Nothing Then
         Me.Caption = "SWExporter  (batch - no document open)"
     Else
         Me.Caption = "SWExporter  -  " & mDoc.GetTitle
     End If
 
-    ' mode + help
-    Lbl "Mode:", 6, 6, 40, TIP_MODE
-    Set cboMode = AddCtl("Forms.ComboBox.1", 50, 6, 200, 16, , TIP_MODE)
-    cboMode.Style = fmStyleDropDownList
-    Set btnHelp = AddCtl("Forms.CommandButton.1", 434, 5, 24, 18, "?", "Help: modes, batch options, name tokens, dry run.")
+    yLeft = BuildWhatSection(6)
+    yLeft = BuildScopeSection(yLeft + SECTION_GAP)
+    yRight = BuildFormatsSection(6)
+    yRight = BuildOutputSection(yRight + SECTION_GAP)
+    yRight = BuildOptionsSection(yRight + SECTION_GAP)
+    If yRight > yLeft Then yLeft = yRight
+    BuildButtons yLeft + 10
 
-    ' left column: items + selection filter
-    Set lblItems = AddCtl("Forms.Label.1", 6, 28, 220, 12, "Items", TIP_ITEMS)
-    Set lstItems = AddCtl("Forms.ListBox.1", 6, 42, 220, 170, , TIP_ITEMS)
-    lstItems.ListStyle = fmListStyleOption
-    lstItems.MultiSelect = fmMultiSelectMulti
-    Set btnAll = AddCtl("Forms.CommandButton.1", 6, 216, 50, 18, "All", "Tick every item.")
-    Set btnNone = AddCtl("Forms.CommandButton.1", 60, 216, 50, 18, "None", "Untick every item.")
-    Set chkSurf = AddCtl("Forms.CheckBox.1", 118, 216, 108, 18, "Surface bodies", TIP_SURF)
-    Lbl "Filter:", 6, 240, 32, TIP_FILTER
-    Set txtFilter = AddCtl("Forms.TextBox.1", 40, 240, 110, 16, , TIP_FILTER)
-    Set chkCase = AddCtl("Forms.CheckBox.1", 154, 240, 72, 16, "Match case", TIP_CASE)
-    Set btnSelMatch = AddCtl("Forms.CommandButton.1", 40, 260, 90, 18, "Select matches", "Tick every item that contains the Filter text.")
-    Set btnClrMatch = AddCtl("Forms.CommandButton.1", 134, 260, 92, 18, "Clear matches", "Untick every item that contains the Filter text.")
+    FillModes                       ' fills the item and format lists too
+End Sub
 
-    ' right column: formats + STL options
-    Lbl "Formats:", 236, 26, 80, TIP_FORMATS
-    Set lstFormats = AddCtl("Forms.ListBox.1", 236, 42, 222, 150, , TIP_FORMATS)
-    lstFormats.ListStyle = fmListStyleOption
-    lstFormats.MultiSelect = fmMultiSelectMulti
-    Set chkPdfOne = AddCtl("Forms.CheckBox.1", 236, 196, 222, 16, "Drawing PDF: one file with all sheets", TIP_PDFONE)
-    chkPdfOne.Value = True
-    Lbl "STL units:", 236, 216, 50, TIP_UNITS
-    Set cboUnits = AddCtl("Forms.ComboBox.1", 288, 216, 56, 16, , TIP_UNITS)
-    cboUnits.Style = fmStyleDropDownList
-    cboUnits.List = Array("mm", "cm", "m", "in", "ft")
-    cboUnits.ListIndex = 0
-    Lbl "Quality:", 350, 216, 40, TIP_QUALITY
-    Set cboQuality = AddCtl("Forms.ComboBox.1", 390, 216, 68, 16, , TIP_QUALITY)
-    cboQuality.Style = fmStyleDropDownList
-    cboQuality.List = Array("Coarse", "Fine", "Custom (SW setting)")
-    cboQuality.ListIndex = 1
-    Set chkBinary = AddCtl("Forms.CheckBox.1", 236, 238, 120, 16, "Binary STL", "Binary STL (smaller). Untick for ASCII STL.")
-    chkBinary.Value = True
+' 1 What to export: mode, its description, the item list, All / None and the count.
+Private Function BuildWhatSection(ByVal y As Single) As Single
+    Dim x As Single
+    x = COL1_X
+    y = SectionHeader("1  What to export", x, y, COL1_W)
+    Lbl "Mode:", x, y, 34, TIP_MODE
+    Set cboMode = Combo(x + 36, y, COL1_W - 36 - 26, TIP_MODE, Empty)
+    Set btnHelp = Btn("?", x + COL1_W - 22, y - 1, 22, "Help: modes, display states, batch, name tokens, dry run.")
+    y = y + ROW_GAP
+    Set lblModeHelp = AddCtl("Forms.Label.1", x, y, COL1_W, 34, , TIP_MODE)
+    lblModeHelp.ForeColor = &H606060
+    y = y + 36
+    Set lblItems = AddCtl("Forms.Label.1", x, y, COL1_W, 12, "Items:", TIP_ITEMS)
+    y = y + 14
+    Set lstItems = CheckList(x, y, COL1_W, 140, TIP_ITEMS)
+    y = y + 144
+    Set btnAll = Btn("All", x, y, 50, "Tick every row.")
+    Set btnNone = Btn("None", x + 54, y, 50, "Untick every row.")
+    Set lblCount = AddCtl("Forms.Label.1", x + 110, y + 1, COL1_W - 110, 24, , TIP_COUNT)
+    BuildWhatSection = y + 24
+End Function
 
-    ' output
-    y = 290
-    Lbl "Output:", 6, y, 42, TIP_OUT
-    Set cboOut = AddCtl("Forms.ComboBox.1", 50, y, 110, 16, , TIP_OUT)
-    cboOut.Style = fmStyleDropDownList
-    cboOut.List = Array("Next to file", "Subfolder", "Custom folder")
-    Set txtOut = AddCtl("Forms.TextBox.1", 164, y, 262, 16, , TIP_OUTTEXT)
-    Set btnBrowseOut = AddCtl("Forms.CommandButton.1", 430, y, 28, 16, "...", "Choose the custom output folder.")
-    cboOut.ListIndex = 0          ' after txtOut/btnBrowseOut exist (fires cboOut_Change)
-    y = y + 22
-    Lbl "Name:", 6, y, 42, TIP_NAME
-    Set txtTemplate = AddCtl("Forms.TextBox.1", 50, y, 228, 16, , TIP_NAME)
-    AddCtl "Forms.Label.1", 284, y, 174, 24, "blank = auto. {file} {config} {body} {sheet} {component} {date} {rev}", TIP_NAME
-    y = y + 28
-    Lbl "If exists:", 6, y, 44, TIP_EXISTS
-    Set cboCollision = AddCtl("Forms.ComboBox.1", 50, y, 110, 16, , TIP_EXISTS)
-    cboCollision.Style = fmStyleDropDownList
-    cboCollision.List = Array("Auto-number", "Skip", "Overwrite")
-    cboCollision.ListIndex = 0
-    Set chkDry = AddCtl("Forms.CheckBox.1", 170, y, 70, 16, "Dry run", "Write nothing; log the paths that would be written.")
-    Set chkLog = AddCtl("Forms.CheckBox.1", 246, y, 110, 16, "Write log CSV", "Save a CSV log of every file written, skipped or failed.")
-    chkLog.Value = False          ' default: no log
-
-    ' batch
-    y = y + 24
-    Lbl "Batch:", 6, y, 34, TIP_BATCH
-    Set txtBatch = AddCtl("Forms.TextBox.1", 42, y, 196, 16, , TIP_BATCH)
-    Set btnBrowseBatch = AddCtl("Forms.CommandButton.1", 242, y, 24, 16, "...", "Choose a folder and list its files.")
-    Set btnRefresh = AddCtl("Forms.CommandButton.1", 270, y, 44, 16, "Refresh", "List the folder's files again (replaces the list).")
-    Set btnAddFiles = AddCtl("Forms.CommandButton.1", 318, y, 64, 16, "Add files...", "Pick one or more parts, assemblies or drawings to add to the list.")
-    Set chkRecurse = AddCtl("Forms.CheckBox.1", 386, y, 72, 16, "Subfolders", "Include files in subfolders of the batch folder.")
-    y = y + 22
-    Lbl "Parts in batch:", 6, y, 70, TIP_PARTS
-    Set cboBatchModel = AddCtl("Forms.ComboBox.1", 76, y, 196, 16, , TIP_PARTS)
-    cboBatchModel.Style = fmStyleDropDownList
-    cboBatchModel.List = Array("All configurations", "Bodies (active config)", "Configurations x bodies")
+' 2 Scope / filters: name filter, surface bodies, config filter, batch source (Batch only).
+Private Function BuildScopeSection(ByVal y As Single) As Single
+    Dim x As Single, fx As Single, fw As Single
+    x = COL1_X
+    fx = x + LBL_W + 2              ' fields line up after the captions
+    fw = COL1_W - LBL_W - 2
+    y = SectionHeader("2  Scope / filters", x, y, COL1_W)
+    Lbl "Filter:", x, y, LBL_W, TIP_FILTER
+    Set txtFilter = Txt(fx, y, fw, TIP_FILTER)
+    y = y + ROW_GAP
+    Set btnSelMatch = Btn("Tick matches", fx, y, (fw - 4) / 2, "Tick every row that contains the Filter text.")
+    Set btnClrMatch = Btn("Untick matches", fx + (fw + 4) / 2, y, (fw - 4) / 2, "Untick every row that contains the Filter text.")
+    y = y + ROW_GAP + 2
+    Set chkCase = Chk("Match case", fx, y, fw, TIP_CASE)
+    y = y + ROW_GAP
+    Set chkSurf = Chk("Surface bodies", x, y, COL1_W, TIP_SURF)
+    y = y + ROW_GAP
+    Set lblCfgFilter = Lbl("Config filter:", x, y, LBL_W, TIP_CFGFILTER)
+    Set txtCfgFilter = Txt(fx, y, fw, TIP_CFGFILTER)
+    y = y + ROW_GAP + 4
+    Set lblBatch = Lbl("Batch folder:", x, y, LBL_W, TIP_BATCH)
+    Set txtBatch = Txt(fx, y, fw - 26, TIP_BATCH)
+    Set btnBrowseBatch = AddCtl("Forms.CommandButton.1", fx + fw - 24, y, 24, ROW_H, "...", "Choose a folder and list its files.")
+    y = y + ROW_GAP
+    Set btnRefresh = Btn("Refresh", fx, y, 60, "List the folder's files again (replaces the list).")
+    Set btnAddFiles = Btn("Add files...", fx + 64, y, 74, "Pick one or more parts, assemblies or drawings to add to the list.")
+    y = y + ROW_GAP + 2
+    Set chkRecurse = Chk("Include subfolders", fx, y, fw, "Include files in subfolders of the batch folder.")
+    y = y + ROW_GAP
+    Set lblBatchModel = Lbl("Parts in batch:", x, y, LBL_W, TIP_PARTS)
+    Set cboBatchModel = Combo(fx, y, fw, TIP_PARTS, _
+        Array("Whole part, each configuration", "Each body (active configuration)", "Each body x configuration"))
     cboBatchModel.ListIndex = 0
-    Lbl "Config filter:", 280, y, 64, TIP_CFGFILTER
-    Set txtCfgFilter = AddCtl("Forms.TextBox.1", 346, y, 112, 16, , TIP_CFGFILTER)
+    BuildScopeSection = y + ROW_H
+End Function
 
-    ' buttons + status
-    y = y + 28
-    Set btnExport = AddCtl("Forms.CommandButton.1", 300, y, 76, 22, "Export", "Start the export.")
-    Set btnClose = AddCtl("Forms.CommandButton.1", 382, y, 76, 22, "Close", "Close the dialog. During an export: cancel after the current file.")
-    Set lblStatus = AddCtl("Forms.Label.1", 6, y, 288, 28, , "Progress of the current export.")
+' 3 Formats: format list, drawing PDF option, STL/OBJ options.
+Private Function BuildFormatsSection(ByVal y As Single) As Single
+    Dim x As Single
+    x = COL2_X
+    y = SectionHeader("3  Formats", x, y, COL2_W)
+    Set lstFormats = CheckList(x, y, COL2_W, 150, TIP_FORMATS)
+    y = y + 154
+    Set chkPdfOne = Chk("Drawing PDF: one file with all sheets", x, y, COL2_W, TIP_PDFONE)
+    chkPdfOne.Value = True
+    y = y + ROW_GAP
+    Set lblUnits = Lbl("Units:", x, y, 34, TIP_UNITS)
+    Set cboUnits = Combo(x + 36, y, 54, TIP_UNITS, Array("mm", "cm", "m", "in", "ft"))
+    cboUnits.ListIndex = 0
+    Set lblQuality = Lbl("Quality:", x + 98, y, 40, TIP_QUALITY)
+    Set cboQuality = Combo(x + 140, y, COL2_W - 140, TIP_QUALITY, Array("Coarse", "Fine", "Custom (SW setting)"))
+    cboQuality.ListIndex = 1
+    y = y + ROW_GAP
+    Set chkBinary = Chk("Binary STL", x, y, COL2_W, "Binary STL (smaller). Untick for ASCII STL.")
+    chkBinary.Value = True
+    BuildFormatsSection = y + ROW_H
+End Function
 
-    FillModes
+' 4 Output & naming: output location, folder, name template, collisions.
+Private Function BuildOutputSection(ByVal y As Single) As Single
+    Dim x As Single, fx As Single, fw As Single
+    x = COL2_X
+    fx = x + 46
+    fw = COL2_W - 46
+    y = SectionHeader("4  Output & naming", x, y, COL2_W)
+    Lbl "Output:", x, y, 44, TIP_OUT
+    Set cboOut = Combo(fx, y, fw, TIP_OUT, Array("Next to file", "Subfolder", "Custom folder"))
+    y = y + ROW_GAP
+    Lbl "Folder:", x, y, 44, TIP_OUTTEXT
+    Set txtOut = Txt(fx, y, fw - 28, TIP_OUTTEXT)
+    Set btnBrowseOut = AddCtl("Forms.CommandButton.1", fx + fw - 24, y, 24, ROW_H, "...", "Choose the custom output folder.")
+    cboOut.ListIndex = 0            ' after txtOut / btnBrowseOut exist (fires cboOut_Change)
+    y = y + ROW_GAP
+    Lbl "Name:", x, y, 44, TIP_NAME
+    Set txtTemplate = Txt(fx, y, fw, TIP_NAME)
+    y = y + 18
+    AddCtl "Forms.Label.1", fx, y, fw, 32, _
+           "Blank = automatic. Tokens: {file} {config} {body} {ds} {sheet} {component} {date} {rev}", TIP_NAME
+    y = y + 34
+    Lbl "If exists:", x, y, 44, TIP_EXISTS
+    Set cboCollision = Combo(fx, y, 110, TIP_EXISTS, Array("Auto-number", "Skip", "Overwrite"))
+    cboCollision.ListIndex = 0
+    BuildOutputSection = y + ROW_H
+End Function
+
+' 5 Options: dry run, log.
+Private Function BuildOptionsSection(ByVal y As Single) As Single
+    Dim x As Single
+    x = COL2_X
+    y = SectionHeader("5  Options", x, y, COL2_W)
+    Set chkDry = Chk("Dry run", x, y, 80, TIP_DRY)
+    Set chkLog = Chk("Write log CSV", x + 84, y, COL2_W - 84, TIP_LOG)
+    chkLog.Value = False            ' default: no log
+    BuildOptionsSection = y + ROW_H
+End Function
+
+' Status on the left, Export / Close bottom-right; then size the form to fit.
+Private Sub BuildButtons(ByVal y As Single)
+    Dim ln As MSForms.Label, xEnd As Single
+    xEnd = COL2_X + COL2_W
+    Set ln = AddCtl("Forms.Label.1", COL1_X, y, xEnd - COL1_X, 1)
+    ln.BackStyle = fmBackStyleOpaque
+    ln.BackColor = &HC0C0C0
+    y = y + 6
+    Set lblStatus = AddCtl("Forms.Label.1", COL1_X, y, xEnd - COL1_X - 170, 28, , "Progress of the current export.")
+    Set btnExport = AddCtl("Forms.CommandButton.1", xEnd - 160, y, 78, 22, "Export", "Start the export.")
+    Set btnClose = AddCtl("Forms.CommandButton.1", xEnd - 78, y, 78, 22, "Close", _
+                          "Close the dialog. During an export: cancel after the current file.")
+    ' size from the inside, so the title bar / border width of this Windows version doesn't matter
+    Me.Width = xEnd + 20
+    Me.Height = y + 60
+    Me.Width = Me.Width + (xEnd + COL1_X) - Me.InsideWidth
+    Me.Height = Me.Height + (y + 30) - Me.InsideHeight
 End Sub
 
 Private Sub UserForm_QueryClose(Cancel As Integer, CloseMode As Integer)
@@ -209,56 +341,94 @@ Private Sub UserForm_Terminate()
     gFormLoaded = False
 End Sub
 
-'------------------------------ help -------------------------------------------
+'=================================== HELP ======================================
 Private Sub btnHelp_Click()
     Dim s As String
     s = "MODES" & vbLf & _
-        "Bodies: each visible body of the part." & vbLf & _
-        "Configurations: whole model once per ticked configuration." & vbLf & _
-        "Configs x bodies: every body of every ticked configuration." & vbLf & _
-        "Components: each visible part of the assembly, once per part and configuration." & vbLf & _
-        "Components x bodies: every body of each of those parts." & vbLf & _
-        "Visible bodies: each visible solid body as its own file." & vbLf & _
-        "Drawing sheets: one file per sheet; PDF as one file or per sheet." & vbLf & _
-        "Batch: files in a folder (+ Subfolders) or picked with Add files." & vbLf & vbLf & _
-        "PARTS IN BATCH: how each part is split - all configurations, bodies of the active configuration, " & _
-        "or configurations x bodies. Assemblies in a batch export their parts the same way; each part once per run." & vbLf & vbLf & _
-        "CONFIG FILTER: batch only. Exports configurations whose name contains the text." & vbLf & vbLf & _
-        "NAME: blank = automatic. Tokens {file} {config} {body} {sheet} {component} {date} {rev}." & vbLf & vbLf & _
-        "IF EXISTS: Auto-number, Skip or Overwrite." & vbLf & vbLf & _
-        "DRY RUN: writes nothing, logs the paths it would write." & vbLf & vbLf & _
+        "Each body: one file per ticked visible body." & vbLf & _
+        "Each body x configuration: every visible body of every ticked configuration." & vbLf & _
+        "Whole part / assembly: the whole model, once per ticked configuration." & vbLf & _
+        "Each part: each visible part of the assembly once, without bodies hidden there." & vbLf & _
+        "Display states: every visible body of each ticked state. Per state tick 'active config' " & _
+        "or 'each configuration' (Config filter). A body already exported in that configuration is skipped." & vbLf & _
+        "Each sheet: one file per sheet." & vbLf & _
+        "Batch: the listed files; parts split per 'Parts in batch'." & vbLf & vbLf & _
+        "NAME: blank = automatic. Tokens {file} {config} {body} {ds} {sheet} {component} {date} {rev}." & vbLf & _
+        "IF EXISTS: Auto-number, Skip or Overwrite." & vbLf & _
+        "DRY RUN: writes nothing; counts and logs the paths." & vbLf & vbLf & _
         "Hover over a control for details."
     MsgBox s, vbInformation, "SWExporter help"
 End Sub
 
-'------------------------------ modes ------------------------------------------
-Private Sub FillModes()
-    Dim names As Collection, ids As Collection, i As Long, t As Long
-    Set names = New Collection
-    Set ids = New Collection
-    If Not mDoc Is Nothing Then t = mDoc.GetType
-    Select Case t
-        Case swDocumentTypes_e.swDocPART
-            names.Add "Bodies (each visible body)": ids.Add MODE_BODIES
-            names.Add "Configurations": ids.Add MODE_CONFIGS
-            names.Add "Configurations x bodies": ids.Add MODE_CFGBODIES
-            names.Add "Visible bodies (solid, one file each)": ids.Add MODE_VISBODIES
-        Case swDocumentTypes_e.swDocASSEMBLY
-            names.Add "Configurations": ids.Add MODE_CONFIGS
-            names.Add "Components (each visible part)": ids.Add MODE_COMPONENTS
-            names.Add "Components x bodies": ids.Add MODE_COMPBODIES
-            names.Add "Visible bodies (each visible body)": ids.Add MODE_VISBODIES
-        Case swDocumentTypes_e.swDocDRAWING
-            names.Add "Drawing sheets": ids.Add MODE_SHEETS
+'=================================== MODES =====================================
+Private Function DocType() As Long
+    If Not mDoc Is Nothing Then DocType = mDoc.GetType
+End Function
+
+Private Function ModeLabel(ByVal md As Long) As String
+    Dim isAsm As Boolean
+    isAsm = (DocType() = swDocumentTypes_e.swDocASSEMBLY)
+    Select Case md
+        Case MODE_BODIES: ModeLabel = "Each body"
+        Case MODE_CFGBODIES: ModeLabel = "Each body x configuration"
+        Case MODE_CONFIGS: ModeLabel = IIf(isAsm, "Whole assembly", "Whole part") & " (per configuration)"
+        Case MODE_COMPONENTS: ModeLabel = "Each part"
+        Case MODE_DISPSTATES: ModeLabel = "Display states"
+        Case MODE_SHEETS: ModeLabel = "Each sheet"
+        Case Else: ModeLabel = "Batch (folder or files)"
     End Select
-    names.Add "Batch (folder or files)": ids.Add MODE_BATCH
-    ReDim mModeIds(0 To ids.Count - 1)
+End Function
+
+' One-line description shown under the mode box (and as its tooltip).
+Private Function ModeHelp(ByVal md As Long) As String
+    Dim isAsm As Boolean
+    isAsm = (DocType() = swDocumentTypes_e.swDocASSEMBLY)
+    Select Case md
+        Case MODE_BODIES
+            If isAsm Then
+                ModeHelp = "One file per ticked visible body. Hidden, suppressed and envelope components " & _
+                           "and hidden bodies are skipped."
+            Else
+                ModeHelp = "One file per ticked body of the active configuration. Only visible bodies are " & _
+                           "listed; tick Surface bodies to add surfaces."
+            End If
+        Case MODE_CFGBODIES
+            ModeHelp = "One file per visible body, in every ticked configuration."
+        Case MODE_CONFIGS
+            ModeHelp = "One file of the whole " & IIf(isAsm, "assembly", "part") & " per ticked configuration."
+        Case MODE_COMPONENTS
+            ModeHelp = "One file per visible part (each part + configuration once). " & _
+                       "Bodies hidden in the assembly are left out."
+        Case MODE_DISPSTATES
+            ModeHelp = "Every visible body of each ticked display state, one file each. Per state tick " & _
+                       "'active config' or 'each configuration'. Repeats are skipped."
+        Case MODE_SHEETS
+            ModeHelp = "One file per ticked sheet. PDF: one file or one per sheet (see Formats)."
+        Case Else
+            ModeHelp = "Every ticked file in the list. Parts are split per 'Parts in batch'; " & _
+                       "assemblies export each part inside."
+    End Select
+End Function
+
+Private Sub FillModes()
+    Dim ids As Variant, i As Long
+    Select Case DocType()
+        Case swDocumentTypes_e.swDocPART
+            ids = Array(MODE_BODIES, MODE_CFGBODIES, MODE_CONFIGS, MODE_DISPSTATES, MODE_BATCH)
+        Case swDocumentTypes_e.swDocASSEMBLY
+            ids = Array(MODE_CONFIGS, MODE_COMPONENTS, MODE_BODIES, MODE_DISPSTATES, MODE_BATCH)
+        Case swDocumentTypes_e.swDocDRAWING
+            ids = Array(MODE_SHEETS, MODE_BATCH)
+        Case Else
+            ids = Array(MODE_BATCH)
+    End Select
+    ReDim mModeIds(0 To UBound(ids))
     cboMode.Clear
-    For i = 1 To ids.Count
-        cboMode.AddItem names(i)
-        mModeIds(i - 1) = ids(i)
+    For i = 0 To UBound(ids)
+        mModeIds(i) = ids(i)
+        cboMode.AddItem ModeLabel(mModeIds(i))
     Next i
-    cboMode.ListIndex = 0          ' fires cboMode_Change
+    cboMode.ListIndex = 0           ' fires cboMode_Change
 End Sub
 
 Private Function CurMode() As Long
@@ -270,23 +440,48 @@ Private Function CurMode() As Long
 End Function
 
 Private Sub cboMode_Change()
+    Dim md As Long
     If cboMode.ListIndex < 0 Then Exit Sub
-    If CurMode() = MODE_VISBODIES Then
-        cboMode.ControlTipText = TIP_VISBODIES
-        lstItems.ControlTipText = TIP_VISBODIES
-    Else
-        cboMode.ControlTipText = TIP_MODE
-        lstItems.ControlTipText = TIP_ITEMS
-    End If
+    md = CurMode()
+    lblModeHelp.Caption = ModeHelp(md)
+    cboMode.ControlTipText = ModeHelp(md)
+    lblModeHelp.ControlTipText = ModeHelp(md)
+    UpdateModeControls md
     FillItems
     FillFormats
 End Sub
 
-Private Sub chkSurf_Click()
-    If CurMode() = MODE_BODIES Or CurMode() = MODE_VISBODIES Then FillItems
+' Shows / enables only what the mode uses.
+Private Sub UpdateModeControls(ByVal md As Long)
+    Dim isBatch As Boolean, notSheets As Boolean
+    isBatch = (md = MODE_BATCH)
+    notSheets = (md <> MODE_SHEETS)
+    chkSurf.Enabled = (md = MODE_BODIES Or md = MODE_CFGBODIES Or md = MODE_DISPSTATES Or isBatch)
+    lblCfgFilter.Enabled = (isBatch Or md = MODE_DISPSTATES)
+    txtCfgFilter.Enabled = lblCfgFilter.Enabled
+    ' batch source: only in Batch
+    lblBatch.Visible = isBatch
+    txtBatch.Visible = isBatch
+    btnBrowseBatch.Visible = isBatch
+    btnRefresh.Visible = isBatch
+    btnAddFiles.Visible = isBatch
+    chkRecurse.Visible = isBatch
+    lblBatchModel.Visible = isBatch
+    cboBatchModel.Visible = isBatch
+    ' format options
+    chkPdfOne.Enabled = (md = MODE_SHEETS Or isBatch)
+    lblUnits.Enabled = notSheets
+    cboUnits.Enabled = notSheets
+    lblQuality.Enabled = notSheets
+    cboQuality.Enabled = notSheets
+    chkBinary.Enabled = notSheets
 End Sub
 
-'------------------------------ item list --------------------------------------
+Private Sub chkSurf_Click()
+    If CurMode() = MODE_BODIES Then FillItems      ' body lists depend on it
+End Sub
+
+'================================= ITEM LIST ===================================
 Private Sub ClearItems()
     lstItems.Clear
     Set mKeys = New Collection
@@ -298,92 +493,162 @@ Private Sub AddListItem(ByVal text As String, ByVal key As String, ByVal ticked 
     lstItems.Selected(lstItems.ListCount - 1) = ticked
 End Sub
 
-Private Sub SetBatchEnabled(ByVal isOn As Boolean)
-    txtBatch.Enabled = isOn
-    btnBrowseBatch.Enabled = isOn
-    btnRefresh.Enabled = isOn
-    btnAddFiles.Enabled = isOn
-    chkRecurse.Enabled = isOn
-    cboBatchModel.Enabled = isOn
-    txtCfgFilter.Enabled = isOn
+Private Sub AddItems(ByVal c As Collection, ByVal ticked As Boolean)
+    Dim i As Long
+    For i = 1 To c.Count
+        AddListItem CStr(c(i)), CStr(c(i)), ticked
+    Next i
 End Sub
 
 Private Sub FillItems()
-    Dim v As Variant, i As Long, c As Collection, activeName As String
-    Dim drw As SldWorks.DrawingDoc, md As Long, d As Object, k As Variant, dc As Object
+    Dim md As Long
     md = CurMode()
+    mFilling = True
     ClearItems
-    chkSurf.Enabled = (md = MODE_BODIES Or md = MODE_CFGBODIES Or md = MODE_COMPBODIES Or md = MODE_BATCH _
-                       Or md = MODE_VISBODIES)
-    SetBatchEnabled (md = MODE_BATCH)
+    lstItems.ControlTipText = TIP_ITEMS
     Select Case md
         Case MODE_BODIES
-            lblItems.Caption = "Visible bodies:"
-            Set c = GetBodyNames(mDoc, CBool(chkSurf.Value))
-            For i = 1 To c.Count
-                AddListItem c(i), c(i), True
-            Next i
-        Case MODE_VISBODIES
-            If mDoc.GetType = swDocumentTypes_e.swDocASSEMBLY Then
-                ' one row per body shown in the assembly; key = "path|config" & Tab & body name
-                lblItems.Caption = "Visible bodies (part [configuration] : body):"
-                Set d = VisibleBodyMap(mDoc, CBool(chkSurf.Value), dc)
-                For Each k In d.Keys
-                    Set c = d(k)
-                    For i = 1 To c.Count
-                        AddListItem PartKeyDisplay(CStr(k)) & " : " & CStr(c(i)), CStr(k) & vbTab & CStr(c(i)), True
-                    Next i
-                Next k
+            If DocType() = swDocumentTypes_e.swDocASSEMBLY Then
+                FillAssemblyBodyItems
             Else
                 lblItems.Caption = "Visible bodies:"
-                Set c = GetBodyNames(mDoc, CBool(chkSurf.Value))
-                For i = 1 To c.Count
-                    AddListItem c(i), c(i), True
-                Next i
+                AddItems GetBodyNames(mDoc, CBool(chkSurf.Value)), True
             End If
         Case MODE_CONFIGS, MODE_CFGBODIES
-            If md = MODE_CONFIGS Then
-                lblItems.Caption = "Configurations:"
-            Else
-                lblItems.Caption = "Configurations (all visible bodies of each):"
-            End If
-            activeName = mDoc.ConfigurationManager.ActiveConfiguration.Name
-            v = mDoc.GetConfigurationNames
-            If IsArray(v) Then
-                For i = LBound(v) To UBound(v)
-                    AddListItem CStr(v(i)), CStr(v(i)), (CStr(v(i)) = activeName)
-                Next i
-            End If
-        Case MODE_COMPONENTS, MODE_COMPBODIES
+            lblItems.Caption = IIf(md = MODE_CONFIGS, "Configurations:", "Configurations (all visible bodies of each):")
+            FillConfigItems
+        Case MODE_COMPONENTS
             lblItems.Caption = "Parts [configuration] (each once):"
-            Set d = AssemblyParts(mDoc, True)
-            For Each k In d.Keys
-                AddListItem PartKeyDisplay(CStr(k)), CStr(k), True
-            Next k
+            FillPartItems
+        Case MODE_DISPSTATES
+            FillDisplayStateItems
         Case MODE_SHEETS
             lblItems.Caption = "Sheets:"
-            Set drw = mDoc
-            v = drw.GetSheetNames
-            If IsArray(v) Then
-                For i = LBound(v) To UBound(v)
-                    AddListItem CStr(v(i)), CStr(v(i)), True
-                Next i
-            End If
+            FillSheetItems
         Case MODE_BATCH
             lblItems.Caption = "Files:"
-            If txtBatch.Text = "" And Not mDoc Is Nothing Then
-                If mDoc.GetPathName <> "" Then
-                    txtBatch.Text = Left$(mDoc.GetPathName, InStrRev(mDoc.GetPathName, "\") - 1)
-                End If
-            End If
-            If txtBatch.Text = "" Then txtBatch.Text = swApp.GetCurrentWorkingDirectory
-            Set c = ListModelFiles(txtBatch.Text, CBool(chkRecurse.Value))
-            For i = 1 To c.Count
-                AddListItem c(i), c(i), True
-            Next i
+            FillBatchItems
     End Select
+    mFilling = False
+    UpdateCount
 End Sub
 
+' Assembly Each body: one row per body shown in the assembly; key = "path|config" & Tab & body.
+Private Sub FillAssemblyBodyItems()
+    Dim d As Object, dc As Object, k As Variant, c As Collection, i As Long
+    lblItems.Caption = "Visible bodies (part [configuration] : body):"
+    Set d = VisibleBodyMap(mDoc, CBool(chkSurf.Value), dc)
+    For Each k In d.Keys
+        Set c = d(k)
+        For i = 1 To c.Count
+            AddListItem PartKeyDisplay(CStr(k)) & " : " & CStr(c(i)), CStr(k) & vbTab & CStr(c(i)), True
+        Next i
+    Next k
+End Sub
+
+' Configurations, the active one ticked.
+Private Sub FillConfigItems()
+    Dim v As Variant, i As Long, activeName As String
+    activeName = mDoc.ConfigurationManager.ActiveConfiguration.Name
+    v = mDoc.GetConfigurationNames
+    If IsArray(v) Then
+        For i = LBound(v) To UBound(v)
+            AddListItem CStr(v(i)), CStr(v(i)), (CStr(v(i)) = activeName)
+        Next i
+    End If
+End Sub
+
+Private Sub FillPartItems()
+    Dim d As Object, k As Variant
+    Set d = AssemblyParts(mDoc, True)
+    For Each k In d.Keys
+        AddListItem PartKeyDisplay(CStr(k)), CStr(k), True
+    Next k
+End Sub
+
+Private Sub FillSheetItems()
+    Dim drw As SldWorks.DrawingDoc, v As Variant, i As Long
+    Set drw = mDoc
+    v = drw.GetSheetNames
+    If IsArray(v) Then
+        For i = LBound(v) To UBound(v)
+            AddListItem CStr(v(i)), CStr(v(i)), True
+        Next i
+    End If
+End Sub
+
+Private Sub FillBatchItems()
+    If txtBatch.Text = "" And Not mDoc Is Nothing Then
+        If mDoc.GetPathName <> "" Then
+            txtBatch.Text = Left$(mDoc.GetPathName, InStrRev(mDoc.GetPathName, "\") - 1)
+        End If
+    End If
+    If txtBatch.Text = "" Then txtBatch.Text = swApp.GetCurrentWorkingDirectory
+    AddItems ListModelFiles(txtBatch.Text, CBool(chkRecurse.Value)), True
+End Sub
+
+' Display states: per state name an "active config" row (ticked) and an "each configuration"
+' row. States that only exist in other configurations get just the "each configuration" row.
+Private Sub FillDisplayStateItems()
+    Dim act As String, actStates As Collection, cfgs As Collection, c As Collection
+    Dim i As Long, j As Long, s As String, others As Collection
+    act = mDoc.ConfigurationManager.ActiveConfiguration.Name
+    lblItems.Caption = "Display states (tick a row per state):"
+    lstItems.ControlTipText = "active config = only in '" & act & "'. each configuration = in every " & _
+                              "configuration matching Config filter that has this state."
+    Set actStates = ConfigDisplayStates(mDoc, act)
+    For i = 1 To actStates.Count
+        s = CStr(actStates(i))
+        AddListItem s & "  -  active config (" & act & ")", DS_ACTIVE & vbTab & s, True
+        AddListItem s & "  -  each configuration", DS_EACH & vbTab & s, False
+    Next i
+    Set others = New Collection
+    Set cfgs = ConfigNamesActiveFirst(mDoc)
+    For i = 2 To cfgs.Count
+        Set c = ConfigDisplayStates(mDoc, CStr(cfgs(i)))
+        For j = 1 To c.Count
+            If Not InCollection(actStates, CStr(c(j))) Then AddUnique others, CStr(c(j))
+        Next j
+    Next i
+    For i = 1 To others.Count
+        s = CStr(others(i))
+        AddListItem s & "  -  each configuration (not in active config)", DS_EACH & vbTab & s, False
+    Next i
+End Sub
+
+' "3 of 8 ticked"; Display states adds the number of configuration x state visits.
+Private Sub UpdateCount()
+    Dim i As Long, n As Long, sel As Collection, plan As Collection, missing As Collection
+    If mFilling Or lblCount Is Nothing Then Exit Sub
+    Set sel = New Collection
+    For i = 0 To lstItems.ListCount - 1
+        If lstItems.Selected(i) Then
+            n = n + 1
+            sel.Add CStr(mKeys(i + 1))
+        End If
+    Next i
+    lblCount.Caption = n & " of " & lstItems.ListCount & " ticked"
+    If CurMode() = MODE_DISPSTATES And n > 0 Then
+        Set missing = New Collection
+        Set plan = DisplayStatePlan(mDoc, sel, Trim$(txtCfgFilter.Text), CBool(chkCase.Value), missing)
+        lblCount.Caption = lblCount.Caption & vbLf & plan.Count & " state/config run(s)" & _
+                           IIf(missing.Count > 0, ", " & missing.Count & " skipped", "")
+    End If
+End Sub
+
+Private Sub lstItems_Change()
+    UpdateCount
+End Sub
+
+Private Sub txtCfgFilter_Change()
+    If CurMode() = MODE_DISPSTATES Then UpdateCount
+End Sub
+
+Private Sub chkCase_Click()
+    If CurMode() = MODE_DISPSTATES Then UpdateCount
+End Sub
+
+'================================ FORMAT LIST ==================================
 Private Sub FillFormats()
     Dim i As Long, n As Long, wantKind As String, prefix As String
     Select Case CurMode()
@@ -407,7 +672,7 @@ Private Sub FillFormats()
     Next i
 End Sub
 
-'------------------------------ list buttons -----------------------------------
+'================================ LIST BUTTONS =================================
 Private Sub btnAll_Click()
     SetAll True
 End Sub
@@ -418,9 +683,12 @@ End Sub
 
 Private Sub SetAll(ByVal v As Boolean)
     Dim i As Long
+    mFilling = True
     For i = 0 To lstItems.ListCount - 1
         lstItems.Selected(i) = v
     Next i
+    mFilling = False
+    UpdateCount
 End Sub
 
 Private Sub btnSelMatch_Click()
@@ -434,12 +702,15 @@ End Sub
 Private Sub SetMatches(ByVal v As Boolean)
     Dim i As Long
     If txtFilter.Text = "" Then Exit Sub
+    mFilling = True
     For i = 0 To lstItems.ListCount - 1
         If MatchesFilter(CStr(lstItems.List(i)), txtFilter.Text, CBool(chkCase.Value)) Then lstItems.Selected(i) = v
     Next i
+    mFilling = False
+    UpdateCount
 End Sub
 
-'------------------------------ folders / files --------------------------------
+'============================== FOLDERS / FILES ================================
 Private Sub cboOut_Change()
     Select Case cboOut.ListIndex
         Case 0
@@ -482,6 +753,7 @@ Private Sub btnAddFiles_Click()
     Dim c As Collection, i As Long, j As Long, dup As Boolean, n As Long
     If CurMode() <> MODE_BATCH Then Exit Sub
     Set c = PickFiles("Add files to the batch", txtBatch.Text)
+    mFilling = True
     For i = 1 To c.Count
         dup = False
         For j = 1 To mKeys.Count
@@ -496,10 +768,12 @@ Private Sub btnAddFiles_Click()
             n = n + 1
         End If
     Next i
+    mFilling = False
+    UpdateCount
     If c.Count > 0 Then ShowStatus n & " file(s) added."
 End Sub
 
-'------------------------------ run --------------------------------------------
+'==================================== RUN ======================================
 Public Sub ShowStatus(ByVal s As String)
     On Error Resume Next
     lblStatus.Caption = s
@@ -516,40 +790,44 @@ Private Sub btnClose_Click()
     Unload Me
 End Sub
 
-Private Sub btnExport_Click()
-    Dim i As Long, anyFmt As Boolean
-    If mBusy Then Exit Sub
-
+' Ticked item keys into gSelItems. False (with a message) if nothing is ticked.
+Private Function CollectItems() As Boolean
+    Dim i As Long
     Set gSelItems = New Collection
     For i = 0 To lstItems.ListCount - 1
         If lstItems.Selected(i) Then gSelItems.Add CStr(mKeys(i + 1))
     Next i
     If gSelItems.Count = 0 Then
-        MsgBox "Tick at least one item.", vbExclamation, "SWExporter"
-        Exit Sub
+        MsgBox "Tick at least one row in the list.", vbExclamation, "SWExporter"
+        Exit Function
     End If
+    CollectItems = True
+End Function
 
+' Ticked formats into gFormats().Selected. False (with a message) if none.
+Private Function CollectFormats() As Boolean
+    Dim i As Long
     For i = 0 To gFormatCount - 1
         gFormats(i).Selected = False
     Next i
     For i = 0 To lstFormats.ListCount - 1
         If lstFormats.Selected(i) Then
             gFormats(mFmtIdx(i)).Selected = True
-            anyFmt = True
+            CollectFormats = True
         End If
     Next i
-    If Not anyFmt Then
-        MsgBox "Tick at least one format.", vbExclamation, "SWExporter"
-        Exit Sub
-    End If
+    If Not CollectFormats Then MsgBox "Tick at least one format.", vbExclamation, "SWExporter"
+End Function
 
+' Every other option into the g* globals. False (with a message) if something is missing.
+Private Function CollectOptions() As Boolean
     gMode = CurMode()
     gIncludeSurfaces = CBool(chkSurf.Value)
     gOutMode = cboOut.ListIndex
     gOutText = Trim$(txtOut.Text)
     If gOutMode = 2 And gOutText = "" Then
         MsgBox "Choose a custom output folder.", vbExclamation, "SWExporter"
-        Exit Sub
+        Exit Function
     End If
     gTemplate = Trim$(txtTemplate.Text)
     gCollision = cboCollision.ListIndex
@@ -564,7 +842,22 @@ Private Sub btnExport_Click()
     gBatchModelMode = Choose(cboBatchModel.ListIndex + 1, MODE_CONFIGS, MODE_BODIES, MODE_CFGBODIES)
     gCfgFilter = Trim$(txtCfgFilter.Text)
     gCfgFilterCase = CBool(chkCase.Value)
+    CollectOptions = True
+End Function
 
+Private Sub btnExport_Click()
+    If mBusy Then Exit Sub
+    If Not CollectItems() Then Exit Sub
+    If Not CollectFormats() Then Exit Sub
+    If Not CollectOptions() Then Exit Sub
+
+    If gMode = MODE_DISPSTATES Then
+        If DisplayStatePlan(mDoc, gSelItems, gCfgFilter, gCfgFilterCase).Count = 0 Then
+            MsgBox "No ticked display state exists in a configuration that matches Config filter.", _
+                   vbExclamation, "SWExporter"
+            Exit Sub
+        End If
+    End If
     If gMode = MODE_BATCH And Not gDryRun Then
         If MsgBox("Export " & gSelItems.Count & " file(s)? Files that are not already open will be " & _
                   "opened and closed again without saving.", vbOKCancel + vbQuestion, "SWExporter") <> vbOK Then Exit Sub

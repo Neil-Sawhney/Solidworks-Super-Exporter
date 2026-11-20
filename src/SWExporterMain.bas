@@ -1,8 +1,9 @@
 '===============================================================================
 ' SWExporter - standard module.  Paste into a new module (Insert > Module).
 ' Successor to Lenny Kikstra's DocExport (v1.30).  Entry point: main
-' Exports bodies, configurations, configs x bodies, assembly components,
-' visible bodies (part or assembly), drawing sheets, or a batch of files to
+' Exports each body, each body x configuration, whole models per configuration,
+' each part of an assembly, each visible body of each display state, drawing
+' sheets, or a batch of files to
 ' STL/STEP/IGES/X_T/SAT/3MF/GLB/OBJ/PDF/eDrawings/DWG/DXF/JPG/PNG.
 ' References (Tools > References):
 '   SldWorks <year> Type Library
@@ -40,15 +41,21 @@ Private Declare PtrSafe Function GetActiveWindow Lib "user32" () As LongPtr
 
 Public swApp As SldWorks.SldWorks
 
-' ---- mode ids ----
-Public Const MODE_BODIES As Long = 0
-Public Const MODE_CONFIGS As Long = 1
-Public Const MODE_CFGBODIES As Long = 2
-Public Const MODE_SHEETS As Long = 3
-Public Const MODE_BATCH As Long = 4
-Public Const MODE_COMPONENTS As Long = 5
-Public Const MODE_COMPBODIES As Long = 6
-Public Const MODE_VISBODIES As Long = 7     ' visible solid bodies, one file each (part or assembly)
+'================================ MODES ========================================
+' Ids are never renumbered. 6 and 7 are retired (see NormalizeMode).
+Public Const MODE_BODIES As Long = 0        ' Each body (part: visible bodies; assembly: visible-bodies walk)
+Public Const MODE_CONFIGS As Long = 1       ' Whole part / Whole assembly, per configuration
+Public Const MODE_CFGBODIES As Long = 2     ' Each body x configuration (parts)
+Public Const MODE_SHEETS As Long = 3        ' Each sheet (drawings)
+Public Const MODE_BATCH As Long = 4         ' Batch (folder or files)
+Public Const MODE_COMPONENTS As Long = 5    ' Each part (assemblies)
+Public Const MODE_DISPSTATES As Long = 8    ' Display states: each visible body of each ticked state
+Private Const MODE_OLD_COMPBODIES As Long = 6   ' retired "Components x bodies" -> MODE_BODIES
+Private Const MODE_OLD_VISBODIES As Long = 7    ' retired "Visible bodies" -> MODE_BODIES
+
+' Display states mode: item keys are DS_ACTIVE or DS_EACH & vbTab & state name.
+Public Const DS_ACTIVE As String = "A"      ' state in the active configuration only
+Public Const DS_EACH As String = "E"        ' state in each configuration matching Config filter
 
 ' ---- format table (filled from the ini or the built-in defaults) ----
 Public Type ExportFormat
@@ -78,7 +85,7 @@ Public gDryRun As Boolean
 Public gWriteLog As Boolean
 Public gBatchFolder As String
 Public gBatchModelMode As Long       ' MODE_CONFIGS / MODE_BODIES / MODE_CFGBODIES
-Public gCfgFilter As String          ' batch: only configs containing this ("" = all)
+Public gCfgFilter As String          ' batch / display states: only configs containing this ("" = all)
 Public gCfgFilterCase As Boolean
 Public gCancel As Boolean
 Public gFormLoaded As Boolean
@@ -97,6 +104,9 @@ Private mDone As Object              ' parts already exported in this run (batch
 Private mFso As Object
 Private mBodyFilter As Collection    ' assembly export: body names shown in the assembly (Nothing = no filter)
 Private mFilterStrict As Boolean     ' True = never fall back to "all bodies" when no name matches
+Private mDispState As String         ' value of {ds}; "" outside Display states mode
+Private mDsOneCfg As Boolean         ' Display states: this state is exported in one configuration only
+Private mDsDone As Object            ' Display states: config (part: name; assembly: "path|config") & Tab & body -> state
 
 ' ---- mesh buffer for the GLB/OBJ writer (meters, 9 floats per triangle) ----
 Private mPos() As Single
@@ -107,6 +117,14 @@ Private mCnt As Long
 Private Function FS() As Object
     If mFso Is Nothing Then Set mFso = CreateObject("Scripting.FileSystemObject")
     Set FS = mFso
+End Function
+
+' Maps retired mode ids to their replacement, so old callers keep working.
+Public Function NormalizeMode(ByVal md As Long) As Long
+    Select Case md
+        Case MODE_OLD_COMPBODIES, MODE_OLD_VISBODIES: NormalizeMode = MODE_BODIES
+        Case Else: NormalizeMode = md
+    End Select
 End Function
 
 '================================ INI ==========================================
@@ -229,6 +247,107 @@ Public Function VisibleBodies(m As SldWorks.ModelDoc2, ByVal inclSurf As Boolean
     End If
     If n > 0 Then VisibleBodies = out
 End Function
+
+'------------------------- display states ---------------------------------------
+' Names of the display states of one configuration (Configuration.GetDisplayStates;
+' the first one is the active state of that configuration).
+Public Function ConfigDisplayStates(m As SldWorks.ModelDoc2, ByVal cfgName As String) As Collection
+    Dim c As Collection, cfg As SldWorks.Configuration, v As Variant, i As Long
+    Set c = New Collection
+    Set ConfigDisplayStates = c
+    If m Is Nothing Then Exit Function
+    On Error Resume Next
+    Set cfg = m.GetConfigurationByName(cfgName)
+    If cfg Is Nothing Then Exit Function
+    v = Empty
+    v = cfg.GetDisplayStates
+    If IsArray(v) Then
+        For i = LBound(v) To UBound(v)
+            If CStr(v(i)) <> "" Then AddUnique c, CStr(v(i))
+        Next i
+    End If
+End Function
+
+' Active display state of the active configuration ("" if it can't be read).
+Public Function ActiveDisplayState(m As SldWorks.ModelDoc2) As String
+    On Error Resume Next
+    ActiveDisplayState = CfgActiveState(m, m.ConfigurationManager.ActiveConfiguration.Name)
+End Function
+
+' Configuration names, the active one first.
+Public Function ConfigNamesActiveFirst(m As SldWorks.ModelDoc2) As Collection
+    Dim c As Collection, v As Variant, i As Long, act As String
+    Set c = New Collection
+    Set ConfigNamesActiveFirst = c
+    If m Is Nothing Then Exit Function
+    act = m.ConfigurationManager.ActiveConfiguration.Name
+    c.Add act
+    v = m.GetConfigurationNames
+    If IsArray(v) Then
+        For i = LBound(v) To UBound(v)
+            AddUnique c, CStr(v(i))
+        Next i
+    End If
+End Function
+
+' Visits for the ticked Display states rows: "config" & Tab & "state" & Tab & "1"|"0"
+' ("1" = this state is visited in one configuration only, so the name can drop {config}).
+' An "each configuration" row wins over the "active config" row of the same state.
+' missing (optional) receives "config" & Tab & "state" for configurations without that state.
+Public Function DisplayStatePlan(m As SldWorks.ModelDoc2, ByVal sel As Collection, ByVal cfgFilter As String, _
+                                 ByVal caseSens As Boolean, Optional ByVal missing As Collection) As Collection
+    Dim plan As Collection, actStates As Collection, eachStates As Collection, cfgs As Collection
+    Dim have As Collection, raw As Collection, perState As Object, i As Long, j As Long
+    Dim s As String, act As String, cfg As String, pr() As String
+    Set plan = New Collection
+    Set DisplayStatePlan = plan
+    If m Is Nothing Or sel Is Nothing Then Exit Function
+    Set actStates = New Collection
+    Set eachStates = New Collection
+    For i = 1 To sel.Count
+        s = CStr(sel(i))
+        If Left$(s, 2) = DS_EACH & vbTab Then AddUnique eachStates, Mid$(s, 3)
+    Next i
+    For i = 1 To sel.Count
+        s = CStr(sel(i))
+        If Left$(s, 2) = DS_ACTIVE & vbTab Then
+            If Not InCollection(eachStates, Mid$(s, 3)) Then AddUnique actStates, Mid$(s, 3)
+        End If
+    Next i
+
+    Set raw = New Collection
+    Set perState = CreateObject("Scripting.Dictionary")
+    Set cfgs = ConfigNamesActiveFirst(m)
+    act = m.ConfigurationManager.ActiveConfiguration.Name
+    For i = 1 To cfgs.Count
+        cfg = CStr(cfgs(i))
+        Set have = ConfigDisplayStates(m, cfg)
+        If cfg = act Then
+            For j = 1 To actStates.Count
+                AddVisit raw, perState, have, missing, cfg, CStr(actStates(j))
+            Next j
+        End If
+        If MatchesFilter(cfg, cfgFilter, caseSens) Then
+            For j = 1 To eachStates.Count
+                AddVisit raw, perState, have, missing, cfg, CStr(eachStates(j))
+            Next j
+        End If
+    Next i
+    For i = 1 To raw.Count
+        pr = Split(CStr(raw(i)), vbTab)
+        plan.Add raw(i) & vbTab & IIf(perState(pr(1)) = 1, "1", "0")
+    Next i
+End Function
+
+Private Sub AddVisit(ByVal raw As Collection, ByVal perState As Object, ByVal have As Collection, _
+                     ByVal missing As Collection, ByVal cfg As String, ByVal st As String)
+    If InCollection(have, st) Then
+        raw.Add cfg & vbTab & st
+        perState(st) = perState(st) + 1
+    ElseIf Not missing Is Nothing Then
+        missing.Add cfg & vbTab & st
+    End If
+End Sub
 
 Public Function MatchesFilter(ByVal s As String, ByVal f As String, ByVal caseSens As Boolean) As Boolean
     If f = "" Then
@@ -563,6 +682,11 @@ Public Sub RunExport(m As SldWorks.ModelDoc2)
     mCompName = ""
     Set mBodyFilter = Nothing
     mFilterStrict = False
+    mDispState = ""
+    mDsOneCfg = False
+    Set mDsDone = CreateObject("Scripting.Dictionary")
+    mDsDone.CompareMode = vbTextCompare
+    gMode = NormalizeMode(gMode)
     mLog = "time,source,config,body,sheet,format,output,status,errors,warnings" & vbCrLf
     mOk = 0: mFail = 0: mSkip = 0: mStep = 0
     gCancel = False
@@ -591,14 +715,12 @@ Public Sub RunExport(m As SldWorks.ModelDoc2)
         RunBatch
     ElseIf m.GetType = swDocumentTypes_e.swDocDRAWING Then
         ExportDrawing m, gSelItems
-    ElseIf gMode = MODE_COMPONENTS Or gMode = MODE_COMPBODIES Then
-        ExportComponents m, gMode, gSelItems
-    ElseIf gMode = MODE_VISBODIES Then
-        If m.GetType = swDocumentTypes_e.swDocASSEMBLY Then
-            ExportVisibleBodies m, gSelItems
-        Else
-            ExportModel m, MODE_BODIES, gSelItems       ' part: the ticked visible bodies, like Bodies mode
-        End If
+    ElseIf gMode = MODE_COMPONENTS Then
+        ExportComponents m, gSelItems
+    ElseIf gMode = MODE_DISPSTATES Then
+        ExportDisplayStates m, gSelItems
+    ElseIf gMode = MODE_BODIES And m.GetType = swDocumentTypes_e.swDocASSEMBLY Then
+        ExportAssemblyBodies m, gSelItems               ' assembly: the ticked visible bodies
     Else
         ExportModel m, gMode, gSelItems
     End If
@@ -613,6 +735,8 @@ Done:
     mCompName = ""
     Set mBodyFilter = Nothing
     mFilterStrict = False
+    mDispState = ""
+    mDsOneCfg = False
     swApp.SetUserPreferenceToggle swUserPreferenceToggle_e.swSTLBinaryFormat, oldBin
     swApp.SetUserPreferenceToggle swUserPreferenceToggle_e.swSTLComponentsIntoOneFile, oldOneFile
     swApp.SetUserPreferenceIntegerValue swUserPreferenceIntegerValue_e.swExportStlUnits, oldUnits
@@ -777,26 +901,25 @@ Private Sub ExportAssemblyParts(asm As SldWorks.ModelDoc2)
     Next k
 End Sub
 
-' Components / Components x bodies with an assembly open.
+' Each part (assembly): every ticked part, whole, in the configuration the assembly uses.
 ' Bodies hidden in the assembly (or its display state) are left out of each part.
-Private Sub ExportComponents(asm As SldWorks.ModelDoc2, ByVal mode As Long, ByVal sel As Collection)
-    Dim d As Object, k As Variant, n As Long, md As Long
+Private Sub ExportComponents(asm As SldWorks.ModelDoc2, ByVal sel As Collection)
+    Dim d As Object, k As Variant, n As Long
     Dim vmap As Object, vcomps As Object, filt As Collection
-    If mode = MODE_COMPONENTS Then md = MODE_CONFIGS Else md = MODE_CFGBODIES
     Set d = AssemblyParts(asm, True)
     Set vmap = VisibleBodyMap(asm, True, vcomps)        ' solids + surfaces shown in the assembly
     For Each k In d.Keys
         If gCancel Then Exit For
         If InCollection(sel, CStr(k)) Then
             n = n + 1
-            SetStatus "Component " & n & ": " & PartKeyDisplay(CStr(k))
+            SetStatus "Part " & n & ": " & PartKeyDisplay(CStr(k))
             Set filt = Nothing
             If vmap.Exists(CStr(k)) Then
                 Set filt = vmap(CStr(k))
                 If filt.Count = 0 Then Set filt = Nothing   ' bodies could not be read: old behaviour
             End If
             mFilterStrict = False
-            ExportAsmPart asm, d(k), CfgOfKey(CStr(k)), md, filt
+            ExportAsmPart asm, d(k), CfgOfKey(CStr(k)), MODE_CONFIGS, filt
         End If
         DoEvents
     Next k
@@ -806,8 +929,8 @@ Private Sub ExportComponents(asm As SldWorks.ModelDoc2, ByVal mode As Long, ByVa
     End If
 End Sub
 
-' Visible bodies with an assembly open. sel holds "path|config" & vbTab & body name.
-Private Sub ExportVisibleBodies(asm As SldWorks.ModelDoc2, ByVal sel As Collection)
+' Each body (assembly). sel holds "path|config" & vbTab & body name.
+Private Sub ExportAssemblyBodies(asm As SldWorks.ModelDoc2, ByVal sel As Collection)
     Dim map As Object, comps As Object, k As Variant, filt As Collection
     Dim i As Long, n As Long, s As String, pfx As String
     Set map = VisibleBodyMap(asm, gIncludeSurfaces, comps)
@@ -823,7 +946,7 @@ Private Sub ExportVisibleBodies(asm As SldWorks.ModelDoc2, ByVal sel As Collecti
         Next i
         If filt.Count > 0 Then
             n = n + 1
-            SetStatus "Visible bodies " & n & ": " & PartKeyDisplay(CStr(k))
+            SetStatus "Bodies of part " & n & ": " & PartKeyDisplay(CStr(k))
             mFilterStrict = True
             ExportAsmPart asm, comps(k), CfgOfKey(CStr(k)), MODE_CFGBODIES, filt
         End If
@@ -835,6 +958,179 @@ Private Sub ExportVisibleBodies(asm As SldWorks.ModelDoc2, ByVal sel As Collecti
         mSkip = mSkip + 1
     End If
 End Sub
+
+'---------------------------- display states -----------------------------------
+' Display states (part or assembly). sel holds DS_ACTIVE/DS_EACH & Tab & state name.
+' Each visit = activate the configuration, apply the display state, check it is active,
+' then export every visible body not already exported for that configuration.
+' The original configuration, display state and selection are restored afterwards,
+' also after an error or Cancel.
+Private Sub ExportDisplayStates(m As SldWorks.ModelDoc2, ByVal sel As Collection)
+    Dim plan As Collection, missing As Collection, pr() As String, i As Long
+    Dim origCfg As String, origState As String, selObjs As Collection
+    Dim cfgName As String, stName As String, lastCfg As String, lastState As String
+
+    Set missing = New Collection
+    Set plan = DisplayStatePlan(m, sel, gCfgFilter, gCfgFilterCase, missing)
+    For i = 1 To missing.Count
+        pr = Split(CStr(missing(i)), vbTab)
+        AddLog DocKey(m), pr(0), "", "", "", "", "SKIPPED: no display state """ & pr(1) & """ in this configuration", 0, 0
+        mSkip = mSkip + 1
+    Next i
+    If plan.Count = 0 Then
+        AddLog DocKey(m), "", "", "", "", "", "SKIPPED: no display state / configuration to export", 0, 0
+        mSkip = mSkip + 1
+        Exit Sub
+    End If
+
+    origCfg = m.ConfigurationManager.ActiveConfiguration.Name
+    origState = ActiveDisplayState(m)
+    Set selObjs = SaveSelection(m)
+
+    On Error GoTo EH
+    For i = 1 To plan.Count
+        If gCancel Then Exit For
+        pr = Split(CStr(plan(i)), vbTab)
+        cfgName = pr(0)
+        stName = pr(1)
+        SetStatus "Display state " & i & "/" & plan.Count & ": " & stName & " [" & cfgName & "]"
+        If cfgName <> lastCfg Then
+            ' leaving a configuration: put back the state that was active in it
+            RestoreCfgState m, lastCfg, lastState
+            lastCfg = cfgName
+            lastState = CfgActiveState(m, cfgName)
+        End If
+        If ApplyConfigAndState(m, cfgName, stName) Then
+            mDispState = stName
+            mDsOneCfg = (pr(2) = "1")
+            If m.GetType = swDocumentTypes_e.swDocASSEMBLY Then
+                ExportStateAssembly m, stName
+            Else
+                ExportStatePart m, cfgName, stName
+            End If
+            mDispState = ""
+        End If
+        DoEvents
+    Next i
+Cleanup:
+    On Error Resume Next
+    mDispState = ""
+    mDsOneCfg = False
+    mFilterStrict = False
+    RestoreCfgState m, lastCfg, lastState
+    If m.ConfigurationManager.ActiveConfiguration.Name <> origCfg Then m.ShowConfiguration2 origCfg
+    RestoreCfgState m, origCfg, origState
+    RestoreSelection m, selObjs
+    m.GraphicsRedraw2
+    Exit Sub
+EH:
+    AddLog DocKey(m), cfgName, "", "", "", "", "ERROR in display state """ & stName & """: " & Err.Description, 0, 0
+    mFail = mFail + 1
+    Resume Cleanup
+End Sub
+
+' Activates the configuration, applies the display state and checks it really is active.
+Private Function ApplyConfigAndState(m As SldWorks.ModelDoc2, ByVal cfgName As String, ByVal stName As String) As Boolean
+    Dim ok As Boolean
+    If m.ConfigurationManager.ActiveConfiguration.Name <> cfgName Then
+        If Not m.ShowConfiguration2(cfgName) Then
+            AddLog DocKey(m), cfgName, "", "", "", "", "FAILED: could not activate configuration", 0, 0
+            mFail = mFail + 1
+            Exit Function
+        End If
+    End If
+    If ActiveDisplayState(m) <> stName Then
+        ok = False
+        On Error Resume Next
+        ok = m.ConfigurationManager.ActiveConfiguration.ApplyDisplayState(stName)
+        On Error GoTo 0
+        m.GraphicsRedraw2
+        If (Not ok) Or ActiveDisplayState(m) <> stName Then
+            AddLog DocKey(m), cfgName, "", "", "", "", "FAILED: could not apply display state """ & stName & """", 0, 0
+            mFail = mFail + 1
+            Exit Function
+        End If
+    End If
+    ApplyConfigAndState = True
+End Function
+
+' Active display state of a configuration (need not be the active configuration).
+Private Function CfgActiveState(m As SldWorks.ModelDoc2, ByVal cfgName As String) As String
+    Dim c As Collection
+    Set c = ConfigDisplayStates(m, cfgName)
+    If c.Count > 0 Then CfgActiveState = CStr(c(1))
+End Function
+
+' Re-applies stName if cfgName is the active configuration and another state is showing.
+Private Sub RestoreCfgState(m As SldWorks.ModelDoc2, ByVal cfgName As String, ByVal stName As String)
+    On Error Resume Next
+    If cfgName = "" Or stName = "" Then Exit Sub
+    If m.ConfigurationManager.ActiveConfiguration.Name <> cfgName Then Exit Sub
+    If ActiveDisplayState(m) <> stName Then
+        m.ConfigurationManager.ActiveConfiguration.ApplyDisplayState stName
+        m.GraphicsRedraw2
+    End If
+End Sub
+
+' Part: the visible bodies of the applied state, minus ones already exported for this configuration.
+Private Sub ExportStatePart(m As SldWorks.ModelDoc2, ByVal cfgName As String, ByVal stName As String)
+    Dim v As Variant, i As Long, nm As String, todo As Collection
+    Set todo = New Collection
+    v = VisibleBodies(m, gIncludeSurfaces)          ' Body2 visibility after the state is applied
+    If Not IsArray(v) Then
+        AddLog DocKey(m), cfgName, "", "", "", "", "SKIPPED: no visible bodies in display state """ & stName & """", 0, 0
+        mSkip = mSkip + 1
+        Exit Sub
+    End If
+    For i = LBound(v) To UBound(v)
+        nm = CStr(v(i).Name)
+        If ClaimBody(DocKey(m), cfgName & vbTab & nm, cfgName, nm, stName) Then todo.Add nm
+    Next i
+    If todo.Count = 0 Then Exit Sub
+    mModelMode = MODE_DISPSTATES
+    Set mBodyFilter = Nothing
+    ExportBodies m, cfgName, todo
+End Sub
+
+' Assembly: the visible-bodies walk under the applied state, one file per body.
+Private Sub ExportStateAssembly(asm As SldWorks.ModelDoc2, ByVal stName As String)
+    Dim map As Object, comps As Object, k As Variant, c As Collection, filt As Collection
+    Dim i As Long, cfg As String
+    Set map = VisibleBodyMap(asm, gIncludeSurfaces, comps)
+    If map.Count = 0 Then
+        AddLog DocKey(asm), "", "", "", "", "", "SKIPPED: no visible bodies in display state """ & stName & """", 0, 0
+        mSkip = mSkip + 1
+        Exit Sub
+    End If
+    For Each k In map.Keys
+        If gCancel Then Exit For
+        Set c = map(k)
+        Set filt = New Collection
+        cfg = CfgOfKey(CStr(k))
+        For i = 1 To c.Count
+            If ClaimBody(PathOfKey(CStr(k)), CStr(k) & vbTab & CStr(c(i)), cfg, CStr(c(i)), stName) Then filt.Add CStr(c(i))
+        Next i
+        If filt.Count > 0 Then
+            mFilterStrict = True
+            ExportAsmPart asm, comps(k), cfg, MODE_CFGBODIES, filt
+        End If
+        DoEvents
+    Next k
+    mFilterStrict = False
+End Sub
+
+' True the first time a body key is seen in this run; afterwards logs a skipped duplicate.
+Private Function ClaimBody(ByVal src As String, ByVal key As String, ByVal cfgName As String, _
+                           ByVal bName As String, ByVal stName As String) As Boolean
+    If mDsDone.Exists(key) Then
+        AddLog src, cfgName, bName, "", "", "", "SKIPPED: duplicate - already exported from display state """ & _
+               mDsDone(key) & """", 0, 0
+        mSkip = mSkip + 1
+    Else
+        mDsDone.Add key, stName
+        ClaimBody = True
+    End If
+End Function
 
 ' Exports one part of an assembly from its own part document.
 ' bodyFilter = names of the bodies shown in the assembly (Nothing = every visible body of the part).
@@ -1714,9 +2010,11 @@ Private Function PlanPath(src As SldWorks.ModelDoc2, fmt As ExportFormat, ByVal 
         Else
             tmpl = "{file}_{config}"
         End If
-        ' leave the config out for drawings, single-config models and Bodies mode (also in batch)
+        If mDispState <> "" Then tmpl = Replace(tmpl, "{file}", "{file}_{ds}")
+        ' leave the config out for drawings, single-config models, Each body (also in batch)
+        ' and display states exported in one configuration only
         If src.GetType = swDocumentTypes_e.swDocDRAWING Or src.GetConfigurationCount <= 1 _
-           Or mModelMode = MODE_BODIES Then
+           Or mModelMode = MODE_BODIES Or (mModelMode = MODE_DISPSTATES And mDsOneCfg) Then
             tmpl = Replace(tmpl, "_{config}", "")
         End If
     End If
@@ -1726,6 +2024,8 @@ Private Function PlanPath(src As SldWorks.ModelDoc2, fmt As ExportFormat, ByVal 
     base = Replace(base, "{config}", cfgName)
     base = Replace(base, "{body}", bName)
     base = Replace(base, "{sheet}", sheet)
+    base = Replace(base, "{displaystate}", mDispState)
+    base = Replace(base, "{ds}", mDispState)
     base = Replace(base, "{date}", Format$(Date, "yyyy-mm-dd"))
     If InStr(1, base, "{rev}", vbTextCompare) > 0 Then base = Replace(base, "{rev}", GetRevision(src, cfgName), , , vbTextCompare)
     base = CleanName(base)
