@@ -23,6 +23,8 @@ Private WithEvents chkCase As MSForms.CheckBox
 Private WithEvents btnSelMatch As MSForms.CommandButton
 Private WithEvents btnClrMatch As MSForms.CommandButton
 Private WithEvents chkSurf As MSForms.CheckBox
+Private lblDsScope As MSForms.Label
+Private WithEvents cboDsScope As MSForms.ComboBox
 Private lblCfgFilter As MSForms.Label
 Private WithEvents txtCfgFilter As MSForms.TextBox
 Private lblBatch As MSForms.Label
@@ -61,6 +63,8 @@ Private mFmtIdx() As Long          ' format list row -> gFormats index
 Private mKeys As Collection        ' item list row (1-based) -> key passed to the export
 Private mBusy As Boolean
 Private mFilling As Boolean        ' True while the item list is being refilled
+Private mDsPrevAll As Collection   ' display-state names listed before a refill (keeps ticks by name)
+Private mDsPrevTicked As Collection
 Private mCtlCount As Long
 
 ' ---- layout (points) ----
@@ -78,10 +82,14 @@ Private Const TIP_MODE As String = "What to export. The choices depend on the op
 Private Const TIP_ITEMS As String = "Tick what to export."
 Private Const TIP_COUNT As String = "How many rows are ticked. Display states: how many configuration x state visits " & _
     "that makes, and how many configurations are skipped because they have no state of that name. Dry run lists every file."
-Private Const TIP_FILTER As String = "Text to look for in the item list (used by Tick / Untick matches)."
+Private Const TIP_FILTER As String = "Used by Tick / Untick matches. Separate terms with commas (any) or spaces (all): " & _
+    """bracket, plate"" matches either; ""top cover"" needs both."
 Private Const TIP_CASE As String = "Make Filter and Config filter case-sensitive."
 Private Const TIP_SURF As String = "Also list and export visible surface bodies."
-Private Const TIP_CFGFILTER As String = "Batch and Display states: only configurations whose name contains this text. Blank = all."
+Private Const TIP_CFGFILTER As String = "Batch, and Display states with All configurations: only matching configurations. " & _
+    "Commas = any, spaces = all. Blank = all."
+Private Const TIP_DSSCOPE As String = "Display states: export each ticked state in the active configuration only, " & _
+    "or in every configuration (matching Config filter) that has a state with that name."
 Private Const TIP_BATCH As String = "Folder for batch export. Its files are listed when you pick it or click Refresh."
 Private Const TIP_PARTS As String = "How each part is split in a batch. Also used for the parts inside batch assemblies."
 Private Const TIP_FORMATS As String = "Tick the formats to write."
@@ -221,12 +229,17 @@ Private Function BuildScopeSection(ByVal y As Single) As Single
     Lbl "Filter:", x, y, LBL_W, TIP_FILTER
     Set txtFilter = Txt(fx, y, fw, TIP_FILTER)
     y = y + ROW_GAP
-    Set btnSelMatch = Btn("Tick matches", fx, y, (fw - 4) / 2, "Tick every row that contains the Filter text.")
-    Set btnClrMatch = Btn("Untick matches", fx + (fw + 4) / 2, y, (fw - 4) / 2, "Untick every row that contains the Filter text.")
+    Set btnSelMatch = Btn("Tick matches", fx, y, (fw - 4) / 2, "Tick every row that matches the Filter.")
+    Set btnClrMatch = Btn("Untick matches", fx + (fw + 4) / 2, y, (fw - 4) / 2, "Untick every row that matches the Filter.")
     y = y + ROW_GAP + 2
     Set chkCase = Chk("Match case", fx, y, fw, TIP_CASE)
     y = y + ROW_GAP
     Set chkSurf = Chk("Surface bodies", x, y, COL1_W, TIP_SURF)
+    y = y + ROW_GAP
+    Set lblDsScope = Lbl("Configurations:", x, y, LBL_W, TIP_DSSCOPE)
+    Set cboDsScope = Combo(fx, y, fw, TIP_DSSCOPE, _
+        Array("Active configuration only", "All configurations (Config filter)"))
+    cboDsScope.ListIndex = 0
     y = y + ROW_GAP
     Set lblCfgFilter = Lbl("Config filter:", x, y, LBL_W, TIP_CFGFILTER)
     Set txtCfgFilter = Txt(fx, y, fw, TIP_CFGFILTER)
@@ -349,10 +362,11 @@ Private Sub btnHelp_Click()
         "Each body x configuration: every visible body of every ticked configuration." & vbLf & _
         "Whole part / assembly: the whole model, once per ticked configuration." & vbLf & _
         "Each part: each visible part of the assembly once, without bodies hidden there." & vbLf & _
-        "Display states: every visible body of each ticked state. Per state tick 'active config' " & _
-        "or 'each configuration' (Config filter). A body already exported in that configuration is skipped." & vbLf & _
+        "Display states: every visible body of each ticked state. Configurations: active only, or all " & _
+        "(Config filter). A body already exported in that configuration is skipped." & vbLf & _
         "Each sheet: one file per sheet." & vbLf & _
         "Batch: the listed files; parts split per 'Parts in batch'." & vbLf & vbLf & _
+        "FILTERS: commas = any term, spaces = all words (""bracket, plate""; ""top cover"")." & vbLf & _
         "NAME: blank = automatic. Tokens {file} {config} {body} {ds} {sheet} {component} {date} {rev}." & vbLf & _
         "IF EXISTS: Auto-number, Skip or Overwrite." & vbLf & _
         "DRY RUN: writes nothing; counts and logs the paths." & vbLf & vbLf & _
@@ -400,8 +414,8 @@ Private Function ModeHelp(ByVal md As Long) As String
             ModeHelp = "One file per visible part (each part + configuration once). " & _
                        "Bodies hidden in the assembly are left out."
         Case MODE_DISPSTATES
-            ModeHelp = "Every visible body of each ticked display state, one file each. Per state tick " & _
-                       "'active config' or 'each configuration'. Repeats are skipped."
+            ModeHelp = "Every visible body of each ticked display state, one file each. Pick the " & _
+                       "configurations in section 2. Repeats are skipped."
         Case MODE_SHEETS
             ModeHelp = "One file per ticked sheet. PDF: one file or one per sheet (see Formats)."
         Case Else
@@ -457,7 +471,9 @@ Private Sub UpdateModeControls(ByVal md As Long)
     isBatch = (md = MODE_BATCH)
     notSheets = (md <> MODE_SHEETS)
     chkSurf.Enabled = (md = MODE_BODIES Or md = MODE_CFGBODIES Or md = MODE_DISPSTATES Or isBatch)
-    lblCfgFilter.Enabled = (isBatch Or md = MODE_DISPSTATES)
+    lblDsScope.Enabled = (md = MODE_DISPSTATES)
+    cboDsScope.Enabled = lblDsScope.Enabled
+    lblCfgFilter.Enabled = isBatch Or (md = MODE_DISPSTATES And DsAllCfgs())
     txtCfgFilter.Enabled = lblCfgFilter.Enabled
     ' batch source: only in Batch
     lblBatch.Visible = isBatch
@@ -587,33 +603,71 @@ Private Sub FillBatchItems()
     AddItems ListModelFiles(txtBatch.Text, CBool(chkRecurse.Value)), True
 End Sub
 
-' Display states: per state name an "active config" row (ticked) and an "each configuration"
-' row. States that only exist in other configurations get just the "each configuration" row.
+' Display states: one row per state name.
+'   Active configuration only: the states of the active configuration, all ticked.
+'   All configurations: every state name found in the configurations matching Config filter
+'   (active configuration's states first); names in the active configuration start ticked.
+' When the list is rebuilt (scope / Config filter / Match case change) ticks are kept by name.
 Private Sub FillDisplayStateItems()
-    Dim act As String, actStates As Collection, cfgs As Collection, c As Collection
-    Dim i As Long, j As Long, s As String, others As Collection
+    Dim act As String, actStates As Collection, names As Collection, cfgs As Collection
+    Dim c As Collection, i As Long, j As Long, s As String, tick As Boolean
     act = mDoc.ConfigurationManager.ActiveConfiguration.Name
-    lblItems.Caption = "Display states (tick a row per state):"
-    lstItems.ControlTipText = "active config = only in '" & act & "'. each configuration = in every " & _
-                              "configuration matching Config filter that has this state."
     Set actStates = ConfigDisplayStates(mDoc, act)
-    For i = 1 To actStates.Count
-        s = CStr(actStates(i))
-        AddListItem s & "  -  active config (" & act & ")", DS_ACTIVE & vbTab & s, True
-        AddListItem s & "  -  each configuration", DS_EACH & vbTab & s, False
+    Set names = New Collection
+    If DsAllCfgs() Then
+        lblItems.Caption = "Display states (all matching configurations):"
+        lstItems.ControlTipText = "Each ticked state is exported in every matching configuration that has it."
+        Set cfgs = ConfigsForDisplayStates(mDoc, Trim$(txtCfgFilter.Text), CBool(chkCase.Value))
+        For i = 1 To cfgs.Count
+            Set c = ConfigDisplayStates(mDoc, CStr(cfgs(i)))
+            For j = 1 To c.Count
+                AddUnique names, CStr(c(j))
+            Next j
+        Next i
+    Else
+        lblItems.Caption = "Display states (" & act & "):"
+        lstItems.ControlTipText = "Each ticked state is exported in the active configuration '" & act & "'."
+        For i = 1 To actStates.Count
+            AddUnique names, CStr(actStates(i))
+        Next i
+    End If
+    For i = 1 To names.Count
+        s = CStr(names(i))
+        If mDsPrevAll Is Nothing Then
+            tick = InCollection(actStates, s)
+        ElseIf InCollection(mDsPrevAll, s) Then
+            tick = InCollection(mDsPrevTicked, s)
+        Else
+            tick = InCollection(actStates, s)
+        End If
+        AddListItem s, s, tick
     Next i
-    Set others = New Collection
-    Set cfgs = ConfigNamesActiveFirst(mDoc)
-    For i = 2 To cfgs.Count
-        Set c = ConfigDisplayStates(mDoc, CStr(cfgs(i)))
-        For j = 1 To c.Count
-            If Not InCollection(actStates, CStr(c(j))) Then AddUnique others, CStr(c(j))
-        Next j
+End Sub
+
+' Rebuilds the display-state list keeping the ticks by state name.
+Private Sub RefillDisplayStates()
+    Dim i As Long
+    If CurMode() <> MODE_DISPSTATES Then Exit Sub
+    Set mDsPrevAll = New Collection
+    Set mDsPrevTicked = New Collection
+    For i = 0 To lstItems.ListCount - 1
+        AddUnique mDsPrevAll, CStr(mKeys(i + 1))
+        If lstItems.Selected(i) Then AddUnique mDsPrevTicked, CStr(mKeys(i + 1))
     Next i
-    For i = 1 To others.Count
-        s = CStr(others(i))
-        AddListItem s & "  -  each configuration (not in active config)", DS_EACH & vbTab & s, False
-    Next i
+    FillItems
+    Set mDsPrevAll = Nothing
+    Set mDsPrevTicked = Nothing
+End Sub
+
+Private Function DsAllCfgs() As Boolean
+    If Not cboDsScope Is Nothing Then DsAllCfgs = (cboDsScope.ListIndex = 1)
+End Function
+
+Private Sub cboDsScope_Change()
+    If mFilling Or cboMode Is Nothing Then Exit Sub
+    If cboMode.ListIndex < 0 Then Exit Sub          ' still building the form
+    UpdateModeControls CurMode()
+    RefillDisplayStates
 End Sub
 
 ' "3 of 8 ticked"; Display states adds the number of configuration x state visits.
@@ -630,7 +684,7 @@ Private Sub UpdateCount()
     lblCount.Caption = n & " of " & lstItems.ListCount & " ticked"
     If CurMode() = MODE_DISPSTATES And n > 0 Then
         Set missing = New Collection
-        Set plan = DisplayStatePlan(mDoc, sel, Trim$(txtCfgFilter.Text), CBool(chkCase.Value), missing)
+        Set plan = DisplayStatePlan(mDoc, sel, DsAllCfgs(), Trim$(txtCfgFilter.Text), CBool(chkCase.Value), missing)
         lblCount.Caption = lblCount.Caption & vbLf & plan.Count & " state/config run(s)" & _
                            IIf(missing.Count > 0, ", " & missing.Count & " skipped", "")
     End If
@@ -641,11 +695,11 @@ Private Sub lstItems_Change()
 End Sub
 
 Private Sub txtCfgFilter_Change()
-    If CurMode() = MODE_DISPSTATES Then UpdateCount
+    If CurMode() = MODE_DISPSTATES And DsAllCfgs() Then RefillDisplayStates
 End Sub
 
 Private Sub chkCase_Click()
-    If CurMode() = MODE_DISPSTATES Then UpdateCount
+    If CurMode() = MODE_DISPSTATES And DsAllCfgs() Then RefillDisplayStates
 End Sub
 
 '================================ FORMAT LIST ==================================
@@ -842,6 +896,7 @@ Private Function CollectOptions() As Boolean
     gBatchModelMode = Choose(cboBatchModel.ListIndex + 1, MODE_CONFIGS, MODE_BODIES, MODE_CFGBODIES)
     gCfgFilter = Trim$(txtCfgFilter.Text)
     gCfgFilterCase = CBool(chkCase.Value)
+    gDsAllCfgs = DsAllCfgs()
     CollectOptions = True
 End Function
 
@@ -852,8 +907,8 @@ Private Sub btnExport_Click()
     If Not CollectOptions() Then Exit Sub
 
     If gMode = MODE_DISPSTATES Then
-        If DisplayStatePlan(mDoc, gSelItems, gCfgFilter, gCfgFilterCase).Count = 0 Then
-            MsgBox "No ticked display state exists in a configuration that matches Config filter.", _
+        If DisplayStatePlan(mDoc, gSelItems, gDsAllCfgs, gCfgFilter, gCfgFilterCase).Count = 0 Then
+            MsgBox "None of the ticked display states exists in the chosen configurations.", _
                    vbExclamation, "SWExporter"
             Exit Sub
         End If

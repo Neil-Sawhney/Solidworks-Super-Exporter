@@ -53,9 +53,9 @@ Public Const MODE_DISPSTATES As Long = 8    ' Display states: each visible body 
 Private Const MODE_OLD_COMPBODIES As Long = 6   ' retired "Components x bodies" -> MODE_BODIES
 Private Const MODE_OLD_VISBODIES As Long = 7    ' retired "Visible bodies" -> MODE_BODIES
 
-' Display states mode: item keys are DS_ACTIVE or DS_EACH & vbTab & state name.
-Public Const DS_ACTIVE As String = "A"      ' state in the active configuration only
-Public Const DS_EACH As String = "E"        ' state in each configuration matching Config filter
+' Display states mode: item keys are display state names (one row per name).
+' gDsAllCfgs = False: each ticked state is exported in the active configuration only.
+' gDsAllCfgs = True:  in every configuration matching Config filter that has a state of that name.
 
 ' ---- format table (filled from the ini or the built-in defaults) ----
 Public Type ExportFormat
@@ -87,6 +87,7 @@ Public gBatchFolder As String
 Public gBatchModelMode As Long       ' MODE_CONFIGS / MODE_BODIES / MODE_CFGBODIES
 Public gCfgFilter As String          ' batch / display states: only configs containing this ("" = all)
 Public gCfgFilterCase As Boolean
+Public gDsAllCfgs As Boolean           ' display states: all configurations (True) or active only (False)
 Public gCancel As Boolean
 Public gFormLoaded As Boolean
 
@@ -290,52 +291,52 @@ Public Function ConfigNamesActiveFirst(m As SldWorks.ModelDoc2) As Collection
     End If
 End Function
 
-' Visits for the ticked Display states rows: "config" & Tab & "state" & Tab & "1"|"0"
+' Visits for the ticked display states: "config" & Tab & "state" & Tab & "1"|"0"
 ' ("1" = this state is visited in one configuration only, so the name can drop {config}).
-' An "each configuration" row wins over the "active config" row of the same state.
+' sel = ticked state names. allCfgs = False: active configuration only; True: every
+' configuration matching cfgFilter (multi-keyword, see MatchesFilter), active one first.
 ' missing (optional) receives "config" & Tab & "state" for configurations without that state.
-Public Function DisplayStatePlan(m As SldWorks.ModelDoc2, ByVal sel As Collection, ByVal cfgFilter As String, _
-                                 ByVal caseSens As Boolean, Optional ByVal missing As Collection) As Collection
-    Dim plan As Collection, actStates As Collection, eachStates As Collection, cfgs As Collection
-    Dim have As Collection, raw As Collection, perState As Object, i As Long, j As Long
-    Dim s As String, act As String, cfg As String, pr() As String
+Public Function DisplayStatePlan(m As SldWorks.ModelDoc2, ByVal sel As Collection, ByVal allCfgs As Boolean, _
+                                 ByVal cfgFilter As String, ByVal caseSens As Boolean, _
+                                 Optional ByVal missing As Collection) As Collection
+    Dim plan As Collection, cfgs As Collection, have As Collection, raw As Collection
+    Dim perState As Object, i As Long, j As Long, act As String, cfg As String, pr() As String
     Set plan = New Collection
     Set DisplayStatePlan = plan
     If m Is Nothing Or sel Is Nothing Then Exit Function
-    Set actStates = New Collection
-    Set eachStates = New Collection
-    For i = 1 To sel.Count
-        s = CStr(sel(i))
-        If Left$(s, 2) = DS_EACH & vbTab Then AddUnique eachStates, Mid$(s, 3)
-    Next i
-    For i = 1 To sel.Count
-        s = CStr(sel(i))
-        If Left$(s, 2) = DS_ACTIVE & vbTab Then
-            If Not InCollection(eachStates, Mid$(s, 3)) Then AddUnique actStates, Mid$(s, 3)
-        End If
-    Next i
-
+    If sel.Count = 0 Then Exit Function
     Set raw = New Collection
     Set perState = CreateObject("Scripting.Dictionary")
-    Set cfgs = ConfigNamesActiveFirst(m)
     act = m.ConfigurationManager.ActiveConfiguration.Name
+    If allCfgs Then
+        Set cfgs = ConfigsForDisplayStates(m, cfgFilter, caseSens)
+    Else
+        Set cfgs = New Collection
+        cfgs.Add act
+    End If
     For i = 1 To cfgs.Count
         cfg = CStr(cfgs(i))
         Set have = ConfigDisplayStates(m, cfg)
-        If cfg = act Then
-            For j = 1 To actStates.Count
-                AddVisit raw, perState, have, missing, cfg, CStr(actStates(j))
-            Next j
-        End If
-        If MatchesFilter(cfg, cfgFilter, caseSens) Then
-            For j = 1 To eachStates.Count
-                AddVisit raw, perState, have, missing, cfg, CStr(eachStates(j))
-            Next j
-        End If
+        For j = 1 To sel.Count
+            AddVisit raw, perState, have, missing, cfg, CStr(sel(j))
+        Next j
     Next i
     For i = 1 To raw.Count
         pr = Split(CStr(raw(i)), vbTab)
         plan.Add raw(i) & vbTab & IIf(perState(pr(1)) = 1, "1", "0")
+    Next i
+End Function
+
+' Configurations used by "All configurations": active first, then the rest, filtered by cfgFilter.
+Public Function ConfigsForDisplayStates(m As SldWorks.ModelDoc2, ByVal cfgFilter As String, _
+                                        ByVal caseSens As Boolean) As Collection
+    Dim all As Collection, c As Collection, i As Long
+    Set c = New Collection
+    Set ConfigsForDisplayStates = c
+    If m Is Nothing Then Exit Function
+    Set all = ConfigNamesActiveFirst(m)
+    For i = 1 To all.Count
+        If MatchesFilter(CStr(all(i)), cfgFilter, caseSens) Then c.Add CStr(all(i))
     Next i
 End Function
 
@@ -349,14 +350,39 @@ Private Sub AddVisit(ByVal raw As Collection, ByVal perState As Object, ByVal ha
     End If
 End Sub
 
+' Multi-keyword filter (used by the item Filter and Config filter):
+'   ","  or ";" separate terms; the name matches if ANY term matches.
+'   spaces inside a term separate words; the term matches if ALL its words are found.
+'   Blank filter matches everything. Example: "bracket, plate" = either; "top cover" = both.
 Public Function MatchesFilter(ByVal s As String, ByVal f As String, ByVal caseSens As Boolean) As Boolean
+    Dim terms() As String, words() As String, i As Long, j As Long, cmp As VbCompareMethod
+    Dim anyTerm As Boolean, allWords As Boolean, nWords As Long
+    f = Trim$(Replace(f, ";", ","))
     If f = "" Then
         MatchesFilter = True
-    ElseIf caseSens Then
-        MatchesFilter = (InStr(1, s, f, vbBinaryCompare) > 0)
-    Else
-        MatchesFilter = (InStr(1, s, f, vbTextCompare) > 0)
+        Exit Function
     End If
+    If caseSens Then cmp = vbBinaryCompare Else cmp = vbTextCompare
+    terms = Split(f, ",")
+    For i = LBound(terms) To UBound(terms)
+        words = Split(Trim$(Replace(terms(i), vbTab, " ")), " ")
+        allWords = True
+        nWords = 0
+        For j = LBound(words) To UBound(words)
+            If words(j) <> "" Then
+                nWords = nWords + 1
+                If InStr(1, s, words(j), cmp) = 0 Then
+                    allWords = False
+                    Exit For
+                End If
+            End If
+        Next j
+        If nWords > 0 And allWords Then
+            anyTerm = True
+            Exit For
+        End If
+    Next i
+    MatchesFilter = anyTerm
 End Function
 
 Public Function ListModelFiles(ByVal folder As String, ByVal recurse As Boolean) As Collection
@@ -960,7 +986,7 @@ Private Sub ExportAssemblyBodies(asm As SldWorks.ModelDoc2, ByVal sel As Collect
 End Sub
 
 '---------------------------- display states -----------------------------------
-' Display states (part or assembly). sel holds DS_ACTIVE/DS_EACH & Tab & state name.
+' Display states (part or assembly). sel holds the ticked state names; gDsAllCfgs sets the configurations.
 ' Each visit = activate the configuration, apply the display state, check it is active,
 ' then export every visible body not already exported for that configuration.
 ' The original configuration, display state and selection are restored afterwards,
@@ -971,7 +997,7 @@ Private Sub ExportDisplayStates(m As SldWorks.ModelDoc2, ByVal sel As Collection
     Dim cfgName As String, stName As String, lastCfg As String, lastState As String
 
     Set missing = New Collection
-    Set plan = DisplayStatePlan(m, sel, gCfgFilter, gCfgFilterCase, missing)
+    Set plan = DisplayStatePlan(m, sel, gDsAllCfgs, gCfgFilter, gCfgFilterCase, missing)
     For i = 1 To missing.Count
         pr = Split(CStr(missing(i)), vbTab)
         AddLog DocKey(m), pr(0), "", "", "", "", "SKIPPED: no display state """ & pr(1) & """ in this configuration", 0, 0
@@ -1029,9 +1055,12 @@ EH:
     Resume Cleanup
 End Sub
 
-' Activates the configuration, applies the display state and checks it really is active.
+' Activates the configuration, then applies the display state on a fresh reference to the
+' active configuration. ApplyDisplayState's own True is trusted; the "first name returned by
+' GetDisplayStates = active state" check is only a fallback when it returns False (it does for a
+' state that is already showing in some versions). The state is always applied, never skipped.
 Private Function ApplyConfigAndState(m As SldWorks.ModelDoc2, ByVal cfgName As String, ByVal stName As String) As Boolean
-    Dim ok As Boolean
+    Dim ok As Boolean, first As String, errTxt As String
     If m.ConfigurationManager.ActiveConfiguration.Name <> cfgName Then
         If Not m.ShowConfiguration2(cfgName) Then
             AddLog DocKey(m), cfgName, "", "", "", "", "FAILED: could not activate configuration", 0, 0
@@ -1039,19 +1068,47 @@ Private Function ApplyConfigAndState(m As SldWorks.ModelDoc2, ByVal cfgName As S
             Exit Function
         End If
     End If
-    If ActiveDisplayState(m) <> stName Then
-        ok = False
+    ok = TryApplyState(m, stName, errTxt)
+    If Not ok Then
+        ' retry once after a rebuild with a newly fetched configuration
         On Error Resume Next
-        ok = m.ConfigurationManager.ActiveConfiguration.ApplyDisplayState(stName)
+        m.ForceRebuild3 False
         On Error GoTo 0
-        m.GraphicsRedraw2
-        If (Not ok) Or ActiveDisplayState(m) <> stName Then
-            AddLog DocKey(m), cfgName, "", "", "", "", "FAILED: could not apply display state """ & stName & """", 0, 0
+        ok = TryApplyState(m, stName, errTxt)
+    End If
+    m.GraphicsRedraw2
+    If Not ok Then
+        first = ActiveDisplayState(m)
+        If StrComp(first, stName, vbTextCompare) = 0 Then
+            ok = True                           ' already the active state
+        Else
+            AddLog DocKey(m), cfgName, "", "", "", "", "FAILED: could not apply display state """ & stName & _
+                   """ (ApplyDisplayState returned False" & IIf(errTxt <> "", "; " & errTxt, "") & _
+                   "; GetDisplayStates lists """ & first & """ first)", 0, 0
             mFail = mFail + 1
             Exit Function
         End If
     End If
     ApplyConfigAndState = True
+End Function
+
+' One ApplyDisplayState call on a freshly fetched active configuration.
+Private Function TryApplyState(m As SldWorks.ModelDoc2, ByVal stName As String, errTxt As String) As Boolean
+    Dim cfg As SldWorks.Configuration
+    On Error Resume Next
+    Set cfg = m.GetActiveConfiguration
+    If cfg Is Nothing Then Set cfg = m.ConfigurationManager.ActiveConfiguration
+    If cfg Is Nothing Then
+        errTxt = "no active configuration"
+        Exit Function
+    End If
+    Err.Clear
+    TryApplyState = cfg.ApplyDisplayState(stName)
+    If Err.Number <> 0 Then
+        errTxt = "error " & Err.Number & ": " & Err.Description
+        TryApplyState = False
+    End If
+    Err.Clear
 End Function
 
 ' Active display state of a configuration (need not be the active configuration).
@@ -1066,10 +1123,9 @@ Private Sub RestoreCfgState(m As SldWorks.ModelDoc2, ByVal cfgName As String, By
     On Error Resume Next
     If cfgName = "" Or stName = "" Then Exit Sub
     If m.ConfigurationManager.ActiveConfiguration.Name <> cfgName Then Exit Sub
-    If ActiveDisplayState(m) <> stName Then
-        m.ConfigurationManager.ActiveConfiguration.ApplyDisplayState stName
-        m.GraphicsRedraw2
-    End If
+    Dim dummy As String
+    TryApplyState m, stName, dummy
+    m.GraphicsRedraw2
 End Sub
 
 ' Part: the visible bodies of the applied state, minus ones already exported for this configuration.

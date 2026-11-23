@@ -8,7 +8,7 @@
 | 2 | Each body x configuration | | | One file per visible body, in every ticked configuration. |
 | 1 | Whole part (per configuration) | Whole assembly (per configuration) | | One file of the whole model per ticked configuration. |
 | 5 | | Each part | | One file per visible part (each part + configuration once); bodies hidden in the assembly left out. |
-| 8 | Display states | Display states | | Every visible body of each ticked display state, one file each; per state "active config" or "each configuration"; repeats skipped. |
+| 8 | Display states | Display states | | Every visible body of each ticked display state, one file each; one row per state; Configurations = active only or all (Config filter); repeats skipped. |
 | 3 | | | Each sheet | One file per ticked sheet; PDF one file or one per sheet. |
 | 4 | Batch | Batch | Batch | Every ticked file; parts split per "Parts in batch". |
 
@@ -107,3 +107,25 @@ disabled for Each sheet.
 3. UserForm `frmSWExporter`: open its code window, delete everything, paste `src/frmSWExporter.txt`
    (the designer form stays empty).
 4. Copy `SWExporter.ini` next to the `.swp` (unchanged; no new keys). Save and run.
+
+
+## Revision 2 (Nov 23, after Neil's first run)
+
+- **Display states list: one row per state.** The "active config" / "each configuration" double rows are gone.
+  A new **Configurations** drop-down in section 2 (enabled in Display states only) picks
+  "Active configuration only" (default; lists the active configuration's states, all ticked) or
+  "All configurations (Config filter)" (lists the union of state names in the matching configurations;
+  the active configuration's states start ticked; each ticked state runs in every matching configuration that has it).
+  Config filter is enabled in Display states only with "All configurations" (and in Batch, as before).
+  Changing the scope, Config filter or Match case rebuilds the list and keeps ticks by state name.
+  `DisplayStatePlan(m, names, allCfgs, cfgFilter, caseSens, missing)`; `DS_ACTIVE` / `DS_EACH` removed; new `gDsAllCfgs`.
+- **Multi-keyword filters.** `MatchesFilter` (Filter box, Config filter in Batch and Display states):
+  `,` or `;` = OR terms, spaces inside a term = AND words, substring match, Match case respected, blank = everything.
+  Tooltips and ? help explain it.
+- **Display state apply fix.** Neil's run logged "could not apply display state" for every state. The old code
+  skipped ApplyDisplayState when GetDisplayStates()(0) already equalled the name, and failed whenever the
+  call returned False or index 0 didn't change. Now the configuration is activated first, ApplyDisplayState is always
+  called on a freshly fetched active configuration (`GetActiveConfiguration`), its True is trusted, a False is retried
+  once after `ForceRebuild3 False`, and only then is the index-0 check used as a fallback ("already active").
+  A remaining failure logs the return value, any COM error and which state GetDisplayStates lists first.
+  Restoring a state at the end always calls ApplyDisplayState too.

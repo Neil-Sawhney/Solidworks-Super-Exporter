@@ -35,7 +35,7 @@ MODE_BODIES, so a caller passing an old id still works.
 - Whole assembly: One file of the whole assembly per ticked configuration.
 - Each part: One file per visible part (each part + configuration once). Bodies hidden in the assembly are left out.
 - Each body (assembly): One file per ticked visible body. Hidden, suppressed and envelope components and hidden bodies are skipped.
-- Display states: Every visible body of each ticked display state as its own file. Tick "active config" or "each configuration" (Config filter) per state. Repeats are skipped.
+- Display states: Every visible body of each ticked display state as its own file. One row per state; Configurations (section 2) = active only or all (Config filter). Repeats are skipped.
 - Each sheet: One file per ticked sheet (PDF: one file or one per sheet).
 - Batch: Every file in the list; parts split per "Parts in batch".
 
@@ -106,3 +106,10 @@ _{config} is dropped when that state is exported in one configuration only (or t
 one configuration). CleanName sanitises as before.
 
 Batch: Display states not offered in Batch (needs per-file picks).
+
+
+## Revision 2 (Nov 23)
+Display states list = one row per state name; scope comes from the "Configurations" drop-down in section 2
+(Active configuration only | All configurations (Config filter)). Filters are multi-keyword: commas/semicolons = any,
+spaces = all. ApplyDisplayState is always called on a fresh active configuration and its return value is trusted.
+See CHANGES-ux-revamp.md, "Revision 2".
